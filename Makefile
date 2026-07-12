@@ -1,4 +1,4 @@
-.PHONY: build test lint run clean venv train-test
+.PHONY: build test lint run clean venv train-test daemon py-test
 
 build:
 	go build -o ssentry ./cmd/ssentry
@@ -21,3 +21,9 @@ venv:
 
 train-test: venv
 	cd python && ./venv/bin/python test_trainer.py
+
+py-test: venv
+	cd python && ./venv/bin/python -m unittest discover -p 'test_*.py'
+
+daemon: venv
+	./python/venv/bin/python python/daemon.py --config config.yaml
