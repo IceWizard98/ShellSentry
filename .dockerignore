@@ -1,0 +1,10 @@
+.git
+docs/
+data/
+*.db
+*.secret
+config.yaml
+rules.json
+ssentry
+.superpowers/
+.DS_Store
