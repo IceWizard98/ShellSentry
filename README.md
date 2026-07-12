@@ -12,6 +12,8 @@
 Shell Sentry (`ssentry`) is a security-first SSH shell wrapper that runs on the server side to detect and challenge anomalous commands in real time. It combines:
 
 - **Per-command anomaly scoring** via a Python inference daemon (Isolation Forest model)
+- **Frequency-encoded behavioural features** (command / country / path all weighted by how often the user does them — common = normal, rare = suspicious)
+- **Novelty gate** (a command / country / path never seen for an already-trained user is challenged in the context of *that user's* history — "you never `sudo`, so this `sudo` is flagged")
 - **Admin pre-filters** (command deny/allow lists, country deny/allow lists, rate limiting)
 - **Adaptive challenges** (TOTP verification for soft/hard anomalies)
 - **Persistent session logging** (per-user SQLite, one session per SSH login)
@@ -61,8 +63,14 @@ flowchart TD
     Model --> Sev{score ≤ threshold?}
     Sev -->|≤ hard| Hard
     Sev -->|≤ soft| Soft
-    Sev -->|normal| Run[Execute command]
+    Sev -->|normal| Nov{trained user &amp;<br/>never-seen cmd/country/path?}
+    Nov -->|yes| NovC[Novelty challenge<br/>novelty_severity soft/hard]
+    Nov -->|no| Run[Execute command]
 ```
+
+Severity is the **max** of the model verdict and the novelty gate: a novel item
+never *downgrades* a harder model/rule verdict, but it escalates a
+model-says-normal command to a challenge.
 
 ## Quickstart
 
@@ -130,8 +138,10 @@ while True:
 ### Run
 
 ```bash
-SSENTRY_CONFIG=config.yaml SSH_CONNECTION="8.8.8.8 22 127.0.0.1 22" ./ssentry
+SSENTRY_CONFIG=config.yaml SSH_CONNECTION="8.8.8.8 22 127.0.0.1 22" ./ssentry run
 ```
+
+(`ssentry run` is the ForceCommand entrypoint; `ssentry train --user X` retrains a model.)
 
 On first login, you'll see a TOTP QR code and secret. Scan it into an authenticator app.
 
@@ -171,6 +181,9 @@ All paths and thresholds are defined in `config.yaml` (copy of `config.example.y
 | `command_timeout_ms` | int | `0` | Per-command wall-clock ceiling; `0` = disabled (keep 0 for interactive use) |
 | `min_sessions_train` | int | `20` | Below this many stored sessions, `ssentry train` skips (not enough data) |
 | `max_sessions_keep` | int | `500` | Above this, the oldest sessions (+ their commands) are pruned before training |
+| `python_bin` | string | `""` | Trainer interpreter; `""` = auto (`python/venv/bin/python`, then `python3`) |
+| `trainer_script` | string | `""` | Path to `trainer.py`; `""` = `./python/trainer.py` |
+| `novelty_severity` | string | `"soft"` | Never-seen command/country/path for a trained user → challenge: `off` \| `soft` \| `hard` (invalid → warns, defaults to soft) |
 
 ## Training
 
@@ -209,6 +222,34 @@ root**, or set absolute paths for a packaged deployment:
 python_bin: "/opt/shell-sentry/venv/bin/python"
 trainer_script: "/opt/shell-sentry/trainer.py"
 ```
+
+## Anomaly Model: Features & Novelty
+
+Each command becomes a 6-value feature vector: `time_cos`, `time_sin` (cyclic
+time-of-day, so 23:59 and 00:00 are adjacent), `geo_id`, `cmd_index`,
+`path_index`, and `secs_since_last`.
+
+**Frequency encoding.** `cmd_index`, `geo_id`, and `path_index` are the
+per-user **occurrence counts** rebuilt at training time (a command run 100 times
+→ 100; a country/path seen twice → 2; never seen → 0). A higher count means a
+more common — hence more normal — item, so a rare or unseen item lands in the
+sparse low region the Isolation Forest flags. (An arbitrary id carries no such
+signal, so it is not used.) The model score is high = normal, low = anomalous;
+`ssentry` challenges when `score ≤ soft/hard` (the 5th / 2nd training
+percentiles in `thresholds.json`).
+
+**Novelty gate.** The model cannot reliably flag a *lone* never-seen command by
+itself (it has no such examples in training, and Isolation Forest is blind to how
+far below its training range a value sits). So a deterministic runtime gate
+handles it: for an **already-trained** user (non-empty vocabulary in
+`dicts.json`), a command / country / path whose index is `0` (never seen) raises
+the severity to `novelty_severity` (default `soft`). It is judged in that user's
+own context — `sudo` is novel for someone who never sudos, normal for an admin
+who does. Only a *resolved-but-unknown* country counts (a geo-unavailable lookup
+is not mistaken for a new location); a `no-path` command never triggers path
+novelty. An explicit `commands.allow`/`countries.allow` bypasses it. Untrained
+users (no vocabulary yet) are never novelty-gated. Every trigger emits a
+`novelty` alert.
 
 ## Rules Format
 
@@ -284,6 +325,8 @@ the line, and full shell-aware parsing is deferred (roadmap). Deny-list `eval`
 - [x] Config & rules templates
 - [x] **Spec 2:** Python inference daemon (Isolation Forest, NDJSON protocol, mtime-based model reload, TTL cache)
 - [x] **Spec 3:** Python trainer (`ssentry train --user X`; retention + gating in Go, stateless Isolation Forest fit in Python, persist dicts + thresholds)
+- [x] Frequency encoding for command / country / path features
+- [x] Novelty gate (never-seen command/country/path for a trained user)
 - [ ] **Spec 4:** ForceCommand integration (via `~/.ssh/authorized_keys command="/path/to/ssentry run --config /etc/ssentry/config.yaml"`)
 - [ ] Nested-shell monitoring (syscall intercept or container boundary monitor)
 - [ ] Performance optimization (connection pooling, model caching, alert batching)
@@ -306,7 +349,9 @@ shell_sentry/
 │   ├── feature.go               # Feature builder & dicts
 │   ├── decide.go                # Severity decision logic
 │   ├── session.go               # Session model
-│   └── rules.go                 # Admin rule engine
+│   ├── rules.go                 # Admin rule engine (deny/allow, segment split)
+│   ├── complete.go              # Shell-line completeness check (unterminated quote/paren)
+│   └── training.go              # Frequency encoders + feature matrix builder
 ├── ports/                      # Hexagonal interfaces
 │   └── ports.go                 # Scorer, Store, GeoResolver, Alerter, OTPVerifier, Shell
 ├── adapters/                   # Technology-specific implementations
@@ -316,14 +361,21 @@ shell_sentry/
 │   ├── alertsock/               # Unix socket admin alerter
 │   ├── totpauth/                # TOTP verification + first-login QR
 │   └── ptyshell/                # PTY-backed persistent shell
-├── cmd/ssentry/                # Main binary
-│   ├── main.go                  # Entry point, wiring
+├── cmd/ssentry/                # Main binary (cobra: `run` + `train`)
+│   ├── main.go                  # Entry point, cobra root, wiring
 │   ├── config.go                # YAML config loader
-│   └── repl.go                  # REPL orchestrator (the main loop)
+│   ├── repl.go                  # REPL orchestrator (the main loop) + novelty gate
+│   └── train.go                 # `ssentry train`: retention, python preflight, hand-off
+├── python/                     # Python side (venv)
+│   ├── daemon.py                # Inference daemon (ThreadingTCPServer, NDJSON)
+│   ├── model_cache.py           # Per-user model cache (mtime reload, TTL evict)
+│   ├── trainer.py               # Stateless Isolation Forest trainer
+│   └── requirements.txt         # scikit-learn, numpy, pyyaml
+├── docker/                     # Linux integration harnesses
 ├── config.example.yaml         # Config template
 ├── rules.example.json          # Rules template
 ├── README.md                   # This file
-├── Makefile                    # Build targets
+├── Makefile                    # Build / test / daemon / venv targets
 ├── justfile                    # Just (Rust make) equivalents
 └── go.mod / go.sum             # Go module definition
 ```
@@ -333,7 +385,9 @@ shell_sentry/
 - Every I/O error is wrapped with `%w` for causal chains.
 - `panic`, `os.Exit`, and `log.Fatal` are forbidden outside `main()`.
 - On scorer timeout, `ssentry` fails open: score is set to `+∞` (normal) and an alert is emitted.
-- On bad TOTP (3 retries exhausted), the session is marked invalid and not persisted.
+- On bad TOTP (`otp_retries` exhausted), the session is marked invalid and not persisted.
+- An incomplete shell line (unterminated quote, trailing `\`, open paren) is rejected before execution, so the sentinel is never swallowed as continuation.
+- The daemon deletes an unusable/corrupt `model.pkl` on load (transient I/O errors propagate instead, so a good model is never destroyed by a flaky read).
 
 ## Contributing
 
