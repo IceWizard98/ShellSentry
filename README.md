@@ -144,6 +144,47 @@ All paths and thresholds are defined in `config.yaml` (copy of `config.example.y
 | `otp_retries` | int | `3` | Max OTP attempts before session invalidates |
 | `rules_path` | string | `./rules.json` | Admin deny/allow rules file (JSON) |
 | `model_ttl_sec` | int | `900` | Model age tolerance (used by trainer; ssentry reads but does not enforce) |
+| `command_timeout_ms` | int | `0` | Per-command wall-clock ceiling; `0` = disabled (keep 0 for interactive use) |
+| `min_sessions_train` | int | `20` | Below this many stored sessions, `ssentry train` skips (not enough data) |
+| `max_sessions_keep` | int | `500` | Above this, the oldest sessions (+ their commands) are pruned before training |
+
+## Training
+
+`ssentry train --user <name>` retrains that user's Isolation Forest from their
+stored sessions:
+
+```bash
+ssentry train --user alice --config /etc/ssentry/config.yaml
+```
+
+Flow: prune the oldest sessions beyond `max_sessions_keep` (cascade-deletes
+their commands) → gate on `min_sessions_train` (skip, no error, if below) →
+rebuild the `command`/`country`/`path` encoders and feature matrix in Go →
+write `<root>/<user>/dicts.json` → hand the numeric matrix to the stateless
+Python trainer (`python/trainer.py`) over stdin, which fits the model and
+writes `model.pkl` + `thresholds.json`.
+
+Setup:
+
+```bash
+make venv         # creates python/venv and installs python/requirements.txt
+make train-test   # runs the trainer's own test suite
+```
+
+The trainer is **preflighted** before any DB work: `ssentry train` verifies the
+Python interpreter and trainer script exist and that the interpreter can import
+`scikit-learn` + `numpy`, failing fast with a clear error (and leaving the DB
+untouched) if not — so a missing venv never half-runs a training pass.
+
+By default (`python_bin: ""`, `trainer_script: ""`) it resolves
+`python/venv/bin/python` then `python3` on `$PATH`, and `python/trainer.py`,
+relative to the current working directory — so **run it from the repo/deploy
+root**, or set absolute paths for a packaged deployment:
+
+```yaml
+python_bin: "/opt/shell-sentry/venv/bin/python"
+trainer_script: "/opt/shell-sentry/trainer.py"
+```
 
 ## Rules Format
 
@@ -218,7 +259,7 @@ the line, and full shell-aware parsing is deferred (roadmap). Deny-list `eval`
 - [x] GeoIP resolution (MaxMind)
 - [x] Config & rules templates
 - [ ] **Spec 2:** Python inference daemon (Isolation Forest, NDJSON protocol, model reload on trainer completion)
-- [ ] **Spec 3:** Python trainer (on new sessions, retrain per-user Isolation Forest, persist dicts + thresholds)
+- [x] **Spec 3:** Python trainer (`ssentry train --user X`; retention + gating in Go, stateless Isolation Forest fit in Python, persist dicts + thresholds)
 - [ ] **Spec 4:** ForceCommand integration (via `~/.ssh/authorized_keys command="/path/to/ssentry run --config /etc/ssentry/config.yaml"`)
 - [ ] Nested-shell monitoring (syscall intercept or container boundary monitor)
 - [ ] Performance optimization (connection pooling, model caching, alert batching)
