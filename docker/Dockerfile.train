@@ -1,0 +1,24 @@
+# Multi-stage: build ssentry on Linux, then a slim runtime image with a venv
+# to run the training e2e harness (retention prune, gate, encoders, Isolation
+# Forest fit). Separate from docker/Dockerfile so the passing runtime harness
+# stays untouched. Build context = repo root.
+FROM golang:1.25-bookworm AS build
+WORKDIR /src
+COPY go.mod go.sum ./
+RUN go mod download
+COPY . .
+RUN CGO_ENABLED=0 go build -o /out/ssentry ./cmd/ssentry
+
+FROM debian:bookworm-slim
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    python3 python3-venv ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+COPY --from=build /out/ssentry /usr/local/bin/ssentry
+# python/ (trainer.py + requirements.txt) must live under the workdir: ssentry
+# train resolves "python/trainer.py" and "python/venv/bin/python" relative to
+# its cwd (ponytail: cwd-relative, run from the repo/deploy root).
+COPY python/trainer.py python/requirements.txt /work/python/
+COPY docker/train_harness.sh /harness/train_harness.sh
+RUN chmod +x /harness/train_harness.sh /usr/local/bin/ssentry
+WORKDIR /work
+ENTRYPOINT ["/harness/train_harness.sh"]
