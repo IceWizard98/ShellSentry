@@ -1,0 +1,12 @@
+{
+  "commands": {
+    "deny": ["rm -rf /", "mkfs", "dd", ":(){:|:&};:"],
+    "allow": ["ls", "pwd", "whoami"]
+  },
+  "min_seconds_between": 1,
+  "countries": {
+    "deny": [],
+    "allow": []
+  },
+  "_note_escape_commands": "Recommended to add to commands.deny until nested-shell monitoring lands: tmux, screen, bash, sh, zsh, python, perl, ruby, ssh, su, sudo, docker"
+}

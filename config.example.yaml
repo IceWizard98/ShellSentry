@@ -1,0 +1,12 @@
+# Shell Sentry runtime config. Copy to config.yaml and edit.
+root_path: "./data"                 # <root>/<user>/ per-user folder
+geoip_db_path: "./GeoLite2-Country.mmdb"
+daemon_addr: "127.0.0.1:9099"       # Python inference daemon (NDJSON/TCP)
+score_timeout_ms: 800               # scorer reply budget; exceed -> fail-open
+alert_socket: "./data/alerts.sock"  # unix socket, admin alert stream
+otp_retries: 3
+rules_path: "./rules.json"
+model_ttl_sec: 900                  # contract value consumed by the Python daemon
+command_timeout_ms: 0               # per-command wall-clock ceiling; 0 = disabled
+                                    # (keep 0 for interactive use so long vi/builds
+                                    # aren't killed; set it for non-interactive)
