@@ -10,10 +10,15 @@ type TrainRow struct {
 	SecsSinceLast int
 }
 
-// BuildDicts rebuilds the per-user encoders from a training set:
-//   - command: cmd word -> id (ids start at 1, first-seen order; 0 = unseen at runtime)
-//   - country: code -> id (ids start at 1; "" is skipped so it maps to 0 = unknown)
-//   - path:    path -> occurrence count (frequency encoding)
+// BuildDicts rebuilds the per-user encoders from a training set. Command,
+// country, and path all use FREQUENCY encoding (occurrence count): a higher
+// count means a more common — hence more normal — item, so a rare or never-seen
+// item lands in the sparse low region the model flags as anomalous. An arbitrary
+// id carries no such signal (id 5 is not "more normal" than id 1), so it is not
+// used.
+//   - command: cmd word -> occurrence count (0 = unseen at runtime)
+//   - country: code -> occurrence count ("" skipped -> 0 = unknown at runtime)
+//   - path:    path -> occurrence count (0 = unseen; 9999999 = no path, at runtime)
 func BuildDicts(rows []TrainRow) Dicts {
 	d := Dicts{
 		Country: map[string]int{},
@@ -23,14 +28,10 @@ func BuildDicts(rows []TrainRow) Dicts {
 	for _, r := range rows {
 		cmd, args := SplitCommand(r.RawCmd)
 		if cmd != "" {
-			if _, ok := d.Command[cmd]; !ok {
-				d.Command[cmd] = len(d.Command) + 1
-			}
+			d.Command[cmd]++
 		}
 		if r.Country != "" {
-			if _, ok := d.Country[r.Country]; !ok {
-				d.Country[r.Country] = len(d.Country) + 1
-			}
+			d.Country[r.Country]++
 		}
 		if p, ok := DetectPath(args); ok {
 			d.Path[p]++
