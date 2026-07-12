@@ -4,6 +4,8 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+
+	"shellsentry/core"
 )
 
 func TestLoadConfig_MissingOTPRetries_DefaultsToThree(t *testing.T) {
@@ -68,5 +70,21 @@ func TestLoadConfig_PythonParams(t *testing.T) {
 	}
 	if c.PythonBin != "/opt/py/bin/python" || c.TrainerScript != "/opt/ss/trainer.py" {
 		t.Fatalf("got %q / %q", c.PythonBin, c.TrainerScript)
+	}
+}
+
+func TestNoveltySev(t *testing.T) {
+	cases := map[string]core.Severity{
+		"":       core.SevSoft, // unset -> soft
+		"soft":   core.SevSoft,
+		"hard":   core.SevHard,
+		"off":    core.SevNone,
+		"SOFT":   core.SevSoft, // invalid -> warn + default soft (not fatal)
+		"nonsense": core.SevSoft,
+	}
+	for in, want := range cases {
+		if got := (Config{NoveltySeverity: in}).NoveltySev(); got != want {
+			t.Errorf("NoveltySev(%q)=%v want %v", in, got, want)
+		}
 	}
 }

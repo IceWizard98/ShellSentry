@@ -160,3 +160,61 @@ func TestREPL_ShellError_DiscardsSession_NoRecord(t *testing.T) {
 		t.Fatalf("shell error must emit shell-error alert; got %+v", al.alerts)
 	}
 }
+
+func TestREPL_NovelCommand_TrainedUser_Challenged(t *testing.T) {
+	d := baseDeps()
+	d.Dicts.Command = map[string]int{"ls": 5, "whoami": 3} // trained vocabulary
+	d.NoveltySeverity = core.SevSoft
+	al := d.Alerter.(*fakeAlerter)
+	sh := d.Shell.(*fakeShell)
+	// "nmap" is not in the vocabulary -> novel -> soft challenge; good OTP -> runs
+	s := RunREPL("alice", "1.2.3.4", "s1", strings.NewReader("nmap 10.0.0.0/8\n"),
+		io.Discard, strings.NewReader("123456\n"), d)
+	if !s.Valid || len(sh.ran) != 1 {
+		t.Fatalf("valid=%v ran=%v", s.Valid, sh.ran)
+	}
+	found := false
+	for _, a := range al.alerts {
+		if a.Severity == "novelty" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("novel command must emit a novelty alert; got %+v", al.alerts)
+	}
+}
+
+func TestREPL_NovelCommand_BadOTP_DiscardsSession(t *testing.T) {
+	d := baseDeps()
+	d.Dicts.Command = map[string]int{"ls": 5}
+	d.NoveltySeverity = core.SevHard
+	d.OTP = fakeOTP{ok: false}
+	s := RunREPL("alice", "1.2.3.4", "s1", strings.NewReader("nmap x\n"),
+		io.Discard, strings.NewReader("000000\n000000\n000000\n"), d)
+	if s.Valid {
+		t.Fatal("novel command + bad OTP must discard session")
+	}
+}
+
+func TestREPL_KnownCommand_TrainedUser_NoNovelty(t *testing.T) {
+	d := baseDeps()
+	d.Dicts.Command = map[string]int{"ls": 5}
+	d.NoveltySeverity = core.SevSoft
+	sh := d.Shell.(*fakeShell)
+	s := RunREPL("alice", "1.2.3.4", "s1", strings.NewReader("ls /home\n"),
+		io.Discard, strings.NewReader(""), d)
+	if !s.Valid || len(sh.ran) != 1 {
+		t.Fatalf("known command must run without novelty challenge: valid=%v ran=%v", s.Valid, sh.ran)
+	}
+}
+
+func TestREPL_UntrainedUser_NoNoveltyGate(t *testing.T) {
+	d := baseDeps() // empty Dicts -> no trained vocabulary
+	d.NoveltySeverity = core.SevSoft
+	sh := d.Shell.(*fakeShell)
+	s := RunREPL("alice", "1.2.3.4", "s1", strings.NewReader("nmap x\n"),
+		io.Discard, strings.NewReader(""), d)
+	if !s.Valid || len(sh.ran) != 1 {
+		t.Fatalf("untrained user must not be novelty-gated: valid=%v ran=%v", s.Valid, sh.ran)
+	}
+}

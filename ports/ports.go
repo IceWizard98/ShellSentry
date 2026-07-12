@@ -31,7 +31,7 @@ type Alert struct {
 	TS        int64  `json:"ts"`
 	User      string `json:"user"`
 	SessionID string `json:"session_id"`
-	Severity  string `json:"severity"` // soft-otp|hard-otp|rule-deny|bad-otp|scorer-timeout|shell-error|blind-spot
+	Severity  string `json:"severity"` // soft-otp|hard-otp|rule-deny|bad-otp|scorer-timeout|shell-error|novelty|blind-spot
 	Reason    string `json:"reason"`
 	Detail    string `json:"detail"`
 }

@@ -94,6 +94,7 @@ func runSession(cfgPath string) error {
 	ip := clientIP() // from SSH_CONNECTION
 	sessionID := fmt.Sprintf("%d", time.Now().UnixNano())
 
+	novSev := cfg.NoveltySev()
 	dicts, softThr, hardThr := loadUserArtifacts(cfg.RootPath, username)
 	rules := loadRules(cfg.RulesPath)
 
@@ -134,9 +135,10 @@ func runSession(cfgPath string) error {
 		Dicts:        dicts,
 		SoftThr:      softThr,
 		HardThr:      hardThr,
-		OTPRetries:   cfg.OTPRetries,
-		ScoreTimeout: cfg.ScoreTimeoutDur(),
-		Now:          func() int64 { return time.Now().Unix() },
+		OTPRetries:      cfg.OTPRetries,
+		ScoreTimeout:    cfg.ScoreTimeoutDur(),
+		Now:             func() int64 { return time.Now().Unix() },
+		NoveltySeverity: novSev,
 	}
 
 	// Single tty owner: os.Stdin feeds BOTH the command prompt and the OTP

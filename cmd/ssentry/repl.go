@@ -50,6 +50,34 @@ type Deps struct {
 	OTPRetries   int
 	ScoreTimeout time.Duration
 	Now          func() int64
+	// NoveltySeverity escalates a command/country/path that is new to an already
+	// trained user (index 0 vs a non-empty vocabulary). SevNone = off.
+	NoveltySeverity core.Severity
+}
+
+// noveltySeverity returns a severity (and a reason) when the command, country,
+// or path is NEVER-SEEN for a user who already has a trained vocabulary — the
+// per-user history IS the context (`sudo` is novel for someone who never sudos,
+// normal for an admin who does). Only a resolved-but-unknown country counts, so
+// a geo-unavailable ("") lookup is not mistaken for a new location.
+func (d Deps) noveltySeverity(cmd, country, path string, hasPath bool) (core.Severity, string) {
+	if d.NoveltySeverity == core.SevNone {
+		return core.SevNone, ""
+	}
+	var what []string
+	if cmd != "" && len(d.Dicts.Command) > 0 && d.Dicts.CmdIndex(cmd) == 0 {
+		what = append(what, "command")
+	}
+	if country != "" && len(d.Dicts.Country) > 0 && d.Dicts.GeoID(country) == 0 {
+		what = append(what, "country")
+	}
+	if hasPath && len(d.Dicts.Path) > 0 && d.Dicts.PathIndex(path, true) == 0 {
+		what = append(what, "path")
+	}
+	if len(what) == 0 {
+		return core.SevNone, ""
+	}
+	return d.NoveltySeverity, "never-seen " + strings.Join(what, "+")
 }
 
 func (d Deps) alert(user, sid, sev, reason, detail string) {
@@ -127,6 +155,18 @@ func RunREPL(user, ip, sessionID string, in io.Reader, out io.Writer, otpIn io.R
 		// can tell it apart from a model-driven hard challenge.
 		if outcome == core.RuleChallengeHard {
 			d.alert(user, sessionID, "rule-deny", "deny rule matched", line)
+		}
+
+		// Novelty gate: a command/country/path that is new to an already-trained
+		// user is judged in the context of that user's own history — escalate to
+		// the stronger of (model severity, novelty severity). An explicit
+		// allow-rule is admin-trusted, so it bypasses novelty.
+		if outcome != core.RuleAllow {
+			path, hasPath := core.DetectPath(args)
+			if nsev, reason := d.noveltySeverity(cmd, country, path, hasPath); nsev > sev {
+				sev = nsev
+				d.alert(user, sessionID, "novelty", reason, line)
+			}
 		}
 
 		if sev != core.SevNone {

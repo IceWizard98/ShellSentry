@@ -6,6 +6,8 @@ import (
 	"time"
 
 	"gopkg.in/yaml.v3"
+
+	"shellsentry/core"
 )
 
 type Config struct {
@@ -31,6 +33,30 @@ type Config struct {
 	// python/trainer.py. Set explicit absolute paths for non-repo-root deploys.
 	PythonBin     string `yaml:"python_bin"`
 	TrainerScript string `yaml:"trainer_script"`
+	// NoveltySeverity gates never-seen items for an already-trained user
+	// (command/country/path with index 0 vs a non-empty trained vocabulary):
+	// "off" | "soft" | "hard". Empty defaults to "soft". The model cannot flag a
+	// lone novel item (it has no such training examples), so this deterministic
+	// gate escalates the per-command severity when the item is new to the user.
+	NoveltySeverity string `yaml:"novelty_severity"`
+}
+
+// NoveltySev maps the config string to a core.Severity; unset -> soft. An
+// unrecognized value warns and falls back to soft rather than failing the
+// session (a cosmetic-knob typo must not lock every user out — same policy as
+// otp_retries).
+func (c Config) NoveltySev() core.Severity {
+	switch c.NoveltySeverity {
+	case "", "soft":
+		return core.SevSoft
+	case "off":
+		return core.SevNone
+	case "hard":
+		return core.SevHard
+	default:
+		fmt.Fprintf(os.Stderr, "ssentry: novelty_severity %q invalid (want off|soft|hard), defaulting to soft\n", c.NoveltySeverity)
+		return core.SevSoft
+	}
 }
 
 func LoadConfig(path string) (Config, error) {
