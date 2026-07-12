@@ -38,3 +38,35 @@ func TestLoadConfig_ExplicitOTPRetries_Preserved(t *testing.T) {
 		t.Fatalf("explicit OTPRetries must be kept; got %d", c.OTPRetries)
 	}
 }
+
+func TestLoadConfig_TrainingParams(t *testing.T) {
+	dir := t.TempDir()
+	p := filepath.Join(dir, "c.yaml")
+	if err := os.WriteFile(p, []byte(
+		"min_sessions_train: 20\nmax_sessions_keep: 500\notp_retries: 3\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	c, err := LoadConfig(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.MinSessionsTrain != 20 || c.MaxSessionsKeep != 500 {
+		t.Fatalf("got min=%d max=%d want 20/500", c.MinSessionsTrain, c.MaxSessionsKeep)
+	}
+}
+
+func TestLoadConfig_PythonParams(t *testing.T) {
+	dir := t.TempDir()
+	p := filepath.Join(dir, "c.yaml")
+	if err := os.WriteFile(p, []byte(
+		"python_bin: /opt/py/bin/python\ntrainer_script: /opt/ss/trainer.py\notp_retries: 3\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	c, err := LoadConfig(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.PythonBin != "/opt/py/bin/python" || c.TrainerScript != "/opt/ss/trainer.py" {
+		t.Fatalf("got %q / %q", c.PythonBin, c.TrainerScript)
+	}
+}

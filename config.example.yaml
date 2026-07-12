@@ -10,3 +10,7 @@ model_ttl_sec: 900                  # contract value consumed by the Python daem
 command_timeout_ms: 0               # per-command wall-clock ceiling; 0 = disabled
                                     # (keep 0 for interactive use so long vi/builds
                                     # aren't killed; set it for non-interactive)
+min_sessions_train: 20              # below this many stored sessions, training is skipped
+max_sessions_keep: 500              # above this, oldest sessions (+commands) are pruned before training
+python_bin: ""                      # trainer interpreter; "" = auto (python/venv/bin/python, then python3)
+trainer_script: ""                  # path to trainer.py; "" = ./python/trainer.py

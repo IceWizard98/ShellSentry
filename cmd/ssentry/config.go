@@ -22,6 +22,15 @@ type Config struct {
 	// interactive use (long-running vi/builds), set it for non-interactive
 	// deployments where a stuck command cannot be recovered by the user.
 	CommandTimeoutMs int `yaml:"command_timeout_ms"`
+	// Training pipeline (spec 3): min stored sessions required to train; and the
+	// max sessions kept per user (older ones are pruned before training).
+	MinSessionsTrain int `yaml:"min_sessions_train"`
+	MaxSessionsKeep  int `yaml:"max_sessions_keep"`
+	// Training subprocess (spec 3). Empty = auto: PythonBin tries
+	// python/venv/bin/python then python3 on $PATH; TrainerScript defaults to
+	// python/trainer.py. Set explicit absolute paths for non-repo-root deploys.
+	PythonBin     string `yaml:"python_bin"`
+	TrainerScript string `yaml:"trainer_script"`
 }
 
 func LoadConfig(path string) (Config, error) {
