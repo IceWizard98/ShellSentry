@@ -54,6 +54,7 @@ func rootCmd() *cobra.Command {
 		SilenceErrors: false,
 	}
 	root.AddCommand(runCmd())
+	root.AddCommand(trainCmd())
 	return root
 }
 
