@@ -86,9 +86,33 @@ Download `GeoLite2-Country.mmdb` from MaxMind (free account) into the project ro
 
 ### Start the Python Inference Daemon
 
-The daemon must be running before `ssentry` launches.
+The daemon scores every command; it must be running before `ssentry` launches.
 
-Quick mock for testing:
+```bash
+make venv       # one-time: create python/venv, install deps
+make daemon     # starts python/daemon.py --config config.yaml
+```
+
+It is a `ThreadingTCPServer` that reads the **same `config.yaml`** as the Go side
+(`daemon_addr`, `root_path`, `model_ttl_sec`). Per user it loads
+`<root_path>/<user>/model.pkl` on demand, caches it in memory, **reloads it
+automatically when a retrain changes the file's mtime**, and evicts models idle
+beyond `model_ttl_sec`. A user with no trained model yet gets a high (normal)
+score, so nothing is challenged; a corrupt model or malformed request closes the
+connection so the runtime fail-opens.
+
+If the daemon runs on a **different host**, give it its own copy of `config.yaml`
+and put `root_path` on a filesystem shared with the trainer (NFS/mount) so both
+sides read the same `model.pkl`.
+
+> **Security — trust boundary:** the daemon `pickle`-loads `model.pkl`, which is
+> arbitrary-code-execution if an attacker can write it. `model.pkl` is trusted
+> **only if the trainer service account is the sole writer of `root_path`** — lock
+> down permissions on `<root_path>/<user>/` (and the shared mount) accordingly.
+> Keep `daemon_addr` on localhost; do not bind `0.0.0.0`. An unusable/corrupt
+> `model.pkl` is deleted on load (the user reverts to untrained until retrained).
+
+For a quick protocol test without a trained model, a one-line mock still works:
 
 ```bash
 python3 -c '
@@ -258,7 +282,7 @@ the line, and full shell-aware parsing is deferred (roadmap). Deny-list `eval`
 - [x] Admin alerting (Unix socket NDJSON stream)
 - [x] GeoIP resolution (MaxMind)
 - [x] Config & rules templates
-- [ ] **Spec 2:** Python inference daemon (Isolation Forest, NDJSON protocol, model reload on trainer completion)
+- [x] **Spec 2:** Python inference daemon (Isolation Forest, NDJSON protocol, mtime-based model reload, TTL cache)
 - [x] **Spec 3:** Python trainer (`ssentry train --user X`; retention + gating in Go, stateless Isolation Forest fit in Python, persist dicts + thresholds)
 - [ ] **Spec 4:** ForceCommand integration (via `~/.ssh/authorized_keys command="/path/to/ssentry run --config /etc/ssentry/config.yaml"`)
 - [ ] Nested-shell monitoring (syscall intercept or container boundary monitor)

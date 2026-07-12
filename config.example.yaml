@@ -2,6 +2,9 @@
 root_path: "./data"                 # <root>/<user>/ per-user folder
 geoip_db_path: "./GeoLite2-Country.mmdb"
 daemon_addr: "127.0.0.1:9099"       # Python inference daemon (NDJSON/TCP)
+                                    # SECURITY: keep this on localhost. The daemon
+                                    # pickle-loads model.pkl; binding 0.0.0.0 exposes
+                                    # that deserialization surface to the network.
 score_timeout_ms: 800               # scorer reply budget; exceed -> fail-open
 alert_socket: "./data/alerts.sock"  # unix socket, admin alert stream
 otp_retries: 3
@@ -14,3 +17,5 @@ min_sessions_train: 20              # below this many stored sessions, training 
 max_sessions_keep: 500              # above this, oldest sessions (+commands) are pruned before training
 python_bin: ""                      # trainer interpreter; "" = auto (python/venv/bin/python, then python3)
 trainer_script: ""                  # path to trainer.py; "" = ./python/trainer.py
+novelty_severity: "soft"            # never-seen command/country/path for a trained
+                                    # user -> challenge: off | soft | hard ("" = soft)
