@@ -1,0 +1,16 @@
+*.secret
+*.db
+.env
+config.yaml
+data/
+diary.md
+CLAUDE.md
+
+.superpowers/
+docs/
+docs/superpowers/
+
+.DS_Store
+__pycache__/
+/ssentry
+**/**venv/
