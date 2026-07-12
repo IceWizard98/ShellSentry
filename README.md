@@ -192,6 +192,20 @@ If multiple rules match, the highest precedence wins. (See the decision flow dia
 
 2. **Future:** Add a second-stage monitor inside the container or use `fanotify` to intercept fork/exec syscalls (not yet implemented).
 
+### Rule Pre-filter: Shell Metacharacter Blind Spot
+
+**Covered:** The rule pre-filter splits each command line on the top-level
+operators `&&`, `||`, `;`, `|`, `&` and checks every segment, so a denied
+command chained after an operator (e.g. `echo hi && mkfs /dev/sda`) is still
+caught.
+
+**Not covered:** command substitution (`$(...)`, backticks), `eval`, and shell
+aliases/functions are **not** parsed — a command hidden inside `$(...)` or run
+via `eval` can still reach the shell without matching a deny entry. This is the
+same class of gap as the nested-shell blind spot; the anomaly model still scores
+the line, and full shell-aware parsing is deferred (roadmap). Deny-list `eval`
+(and untrusted interpreters) for defence in depth.
+
 ## Roadmap
 
 - [x] Core feature engineering (time-of-day cycling, path detection)
@@ -205,7 +219,7 @@ If multiple rules match, the highest precedence wins. (See the decision flow dia
 - [x] Config & rules templates
 - [ ] **Spec 2:** Python inference daemon (Isolation Forest, NDJSON protocol, model reload on trainer completion)
 - [ ] **Spec 3:** Python trainer (on new sessions, retrain per-user Isolation Forest, persist dicts + thresholds)
-- [ ] **Spec 4:** ForceCommand integration (via `~/.ssh/authorized_keys force-command=/path/to/ssentry`)
+- [ ] **Spec 4:** ForceCommand integration (via `~/.ssh/authorized_keys command="/path/to/ssentry run --config /etc/ssentry/config.yaml"`)
 - [ ] Nested-shell monitoring (syscall intercept or container boundary monitor)
 - [ ] Performance optimization (connection pooling, model caching, alert batching)
 
