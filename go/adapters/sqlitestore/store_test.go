@@ -3,6 +3,7 @@ package sqlitestore
 import (
 	"database/sql"
 	"path/filepath"
+	"sync"
 	"testing"
 
 	"shellsentry/core"
@@ -49,6 +50,50 @@ func TestSaveSession_RoundTrip(t *testing.T) {
 	}
 	if raw != "cat /etc/passwd" || geo != 1 {
 		t.Fatalf("bad row: %q geo=%d", raw, geo)
+	}
+}
+
+// TestSaveSession_ConcurrentSameUser guards against data loss when the same
+// user has several simultaneous SSH sessions writing to one per-user DB: each
+// SaveSession opens its own connection, so without a busy timeout the loser of
+// a commit race gets SQLITE_BUSY ("database is locked") and its session is
+// dropped. All writers must succeed (blocking briefly is fine; failing is not).
+func TestSaveSession_ConcurrentSameUser(t *testing.T) {
+	root := t.TempDir()
+	st := New(root)
+	defer st.Close()
+
+	const n = 8
+	var wg sync.WaitGroup
+	errs := make([]error, n)
+	start := make(chan struct{})
+	for i := 0; i < n; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			s := core.NewSession(int64(1000 + i))
+			s.EndTS = int64(1100 + i)
+			for j := 0; j < 10; j++ {
+				s.Add(core.CommandRecord{TS: int64(1000 + i), RawCmd: "ls", IP: "8.8.8.8"})
+			}
+			<-start // release all goroutines together to maximize contention
+			errs[i] = st.SaveSession("alice", s)
+		}(i)
+	}
+	close(start)
+	wg.Wait()
+
+	for i, err := range errs {
+		if err != nil {
+			t.Errorf("concurrent SaveSession %d failed: %v", i, err)
+		}
+	}
+	got, err := st.CountSessions("alice")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != n {
+		t.Fatalf("persisted %d sessions, want %d (lost writes to lock contention)", got, n)
 	}
 }
 

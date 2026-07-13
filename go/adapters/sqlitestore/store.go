@@ -36,7 +36,17 @@ func (st *Store) open(user string) (*sql.DB, error) {
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return nil, fmt.Errorf("mkdir user dir: %w", err)
 	}
-	db, err := sql.Open("sqlite", filepath.Join(dir, "sessions.db"))
+	// busy_timeout: the same user can have several concurrent SSH sessions, each
+	// opening its own connection to this one per-user DB. Without it, the loser
+	// of a write race gets SQLITE_BUSY immediately and its whole session is lost;
+	// with it the writer waits (writes still serialize) instead of failing.
+	// (WAL is deliberately NOT set here: switching journal mode needs an
+	// exclusive lock and returns SQLITE_BUSY immediately — busy_timeout does not
+	// retry a journal_mode change — so a per-open WAL switch reintroduces the
+	// very race under concurrency.)
+	dsn := "file:" + filepath.Join(dir, "sessions.db") +
+		"?_pragma=busy_timeout(5000)"
+	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		return nil, fmt.Errorf("open db: %w", err)
 	}
