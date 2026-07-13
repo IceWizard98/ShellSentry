@@ -42,7 +42,10 @@ func (a *TOTP) EnsureProvisioned(user string) error {
 		return fmt.Errorf("generate totp: %w", err)
 	}
 	fmt.Fprintln(a.out, "First login — scan this QR in your Authenticator app:")
-	qrterminal.Generate(key.URL(), qrterminal.L, a.out)
+	// Half-block glyphs (not Generate's ANSI-colored full blocks): no color
+	// dependency, half the width/height so it fits an 80-col terminal without
+	// wrapping, and no sixel terminal-probe side effect on stdout.
+	qrterminal.GenerateHalfBlock(key.URL(), qrterminal.L, a.out)
 	fmt.Fprintf(a.out, "Or enter this secret manually: %s\n", key.Secret())
 	fmt.Fprint(a.out, "Have you saved it in your authenticator? Confirm enrollment [y/N]: ")
 

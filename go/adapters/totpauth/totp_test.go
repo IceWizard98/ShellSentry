@@ -1,6 +1,7 @@
 package totpauth
 
 import (
+	"bytes"
 	"io"
 	"os"
 	"path/filepath"
@@ -10,6 +11,43 @@ import (
 
 	"github.com/pquerna/otp/totp"
 )
+
+// The enrollment QR must render as a clean, scannable block grid on a plain
+// 80-col terminal: no ANSI color escapes (color-poor terminals collapse
+// those to blank) and no line wider than 80 runes (wrapping scrambles it).
+func TestEnsureProvisioned_QRIsScannable(t *testing.T) {
+	root := t.TempDir()
+	var out bytes.Buffer
+	a := New(root, "shellsentry", strings.NewReader("y\n"), &out)
+	if err := a.EnsureProvisioned("dave"); err != nil {
+		t.Fatal(err)
+	}
+	s := out.String()
+	if len(s) == 0 {
+		t.Fatal("no QR output written")
+	}
+	if strings.Contains(s, "\033[") {
+		t.Fatal("QR output contains ANSI escapes; use half-block renderer")
+	}
+	// Only the QR grid itself must fit 80 cols; informational text lines (the
+	// fallback URL) may be longer. QR lines are pure half-block glyphs + space.
+	sawQR := false
+	for _, line := range strings.Split(s, "\n") {
+		if strings.Trim(line, "█▀▄ ") != "" {
+			continue // not a QR row
+		}
+		if strings.TrimSpace(line) == "" {
+			continue
+		}
+		sawQR = true
+		if n := len([]rune(line)); n > 80 {
+			t.Fatalf("QR line wider than 80 cols (%d), will wrap and become unscannable", n)
+		}
+	}
+	if !sawQR {
+		t.Fatal("no QR block rows found in output")
+	}
+}
 
 func TestEnsureProvisioned_ConfirmedThenValidates(t *testing.T) {
 	root := t.TempDir()
