@@ -1,20 +1,20 @@
-# Just recipes for Shell Sentry build tasks
+# Just recipes for Shell Sentry (Go under ./go, Python under ./python)
 
 build:
-    go build -o ssentry ./cmd/ssentry
+    go -C go build -o ../ssentry ./cmd/ssentry
 
 test:
-    go test -v ./...
+    go -C go test ./...
 
 lint:
-    go vet ./...
+    go -C go vet ./...
 
 run: build
-    ./ssentry
+    ./ssentry run
 
 clean:
     rm -f ssentry
-    go clean
+    go -C go clean
 
 venv:
     cd python && python3 -m venv venv && ./venv/bin/pip install -r requirements.txt

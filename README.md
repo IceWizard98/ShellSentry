@@ -76,8 +76,12 @@ model-says-normal command to a challenge.
 
 ### Build
 
+The Go module lives under `./go`, the Python side under `./python`.
+
 ```bash
-go build -o ssentry ./cmd/ssentry
+make build                              # -> ./ssentry (runs from repo root)
+# or directly:
+go -C go build -o ../ssentry ./cmd/ssentry
 ```
 
 ### Configure
@@ -334,39 +338,42 @@ the line, and full shell-aware parsing is deferred (roadmap). Deny-list `eval`
 ## Development
 
 ```bash
-go test ./...   # run tests
-go vet ./...    # lint
-go build -o ssentry ./cmd/ssentry   # build
+make test          # go -C go test ./...
+make lint          # go -C go vet ./...
+make build         # -> ./ssentry
+make py-test       # python unit tests (daemon, model_cache, trainer)
 ```
 
 ## Files & Architecture
 
 ```
 shell_sentry/
-├── core/                       # Pure Go, zero external deps
-│   ├── timecycle.go             # Time-of-day cyclic encoding
-│   ├── path.go                  # Path argument detection
-│   ├── feature.go               # Feature builder & dicts
-│   ├── decide.go                # Severity decision logic
-│   ├── session.go               # Session model
-│   ├── rules.go                 # Admin rule engine (deny/allow, segment split)
-│   ├── complete.go              # Shell-line completeness check (unterminated quote/paren)
-│   └── training.go              # Frequency encoders + feature matrix builder
-├── ports/                      # Hexagonal interfaces
-│   └── ports.go                 # Scorer, Store, GeoResolver, Alerter, OTPVerifier, Shell
-├── adapters/                   # Technology-specific implementations
-│   ├── sqlitestore/             # Per-user SQLite session persistence
-│   ├── scorerclient/            # NDJSON/TCP client to Python daemon
-│   ├── geomaxmind/              # MaxMind GeoLite2 Country lookup
-│   ├── alertsock/               # Unix socket admin alerter
-│   ├── totpauth/                # TOTP verification + first-login QR
-│   └── ptyshell/                # PTY-backed persistent shell
-├── cmd/ssentry/                # Main binary (cobra: `run` + `train`)
-│   ├── main.go                  # Entry point, cobra root, wiring
-│   ├── config.go                # YAML config loader
-│   ├── repl.go                  # REPL orchestrator (the main loop) + novelty gate
-│   └── train.go                 # `ssentry train`: retention, python preflight, hand-off
-├── python/                     # Python side (venv)
+├── go/                         # Go module (`shellsentry`) — the runtime
+│   ├── core/                    # Pure Go, zero external deps
+│   │   ├── timecycle.go          # Time-of-day cyclic encoding
+│   │   ├── path.go               # Path argument detection
+│   │   ├── feature.go            # Feature builder & dicts
+│   │   ├── decide.go             # Severity decision logic
+│   │   ├── session.go            # Session model
+│   │   ├── rules.go              # Admin rule engine (deny/allow, segment split)
+│   │   ├── complete.go           # Shell-line completeness check (unterminated quote/paren)
+│   │   └── training.go           # Frequency encoders + feature matrix builder
+│   ├── ports/                   # Hexagonal interfaces
+│   │   └── ports.go              # Scorer, Store, GeoResolver, Alerter, OTPVerifier, Shell
+│   ├── adapters/                # Technology-specific implementations
+│   │   ├── sqlitestore/          # Per-user SQLite session persistence
+│   │   ├── scorerclient/         # NDJSON/TCP client to Python daemon
+│   │   ├── geomaxmind/           # MaxMind GeoLite2 Country lookup
+│   │   ├── alertsock/            # Unix socket admin alerter
+│   │   ├── totpauth/             # TOTP verification + first-login QR
+│   │   └── ptyshell/             # PTY-backed persistent shell
+│   ├── cmd/ssentry/             # Main binary (cobra: `run` + `train`)
+│   │   ├── main.go               # Entry point, cobra root, wiring
+│   │   ├── config.go             # YAML config loader
+│   │   ├── repl.go               # REPL orchestrator (the main loop) + novelty gate
+│   │   └── train.go              # `ssentry train`: retention, python preflight, hand-off
+│   └── go.mod / go.sum          # Go module definition
+├── python/                     # Python side (venv) — training + inference
 │   ├── daemon.py                # Inference daemon (ThreadingTCPServer, NDJSON)
 │   ├── model_cache.py           # Per-user model cache (mtime reload, TTL evict)
 │   ├── trainer.py               # Stateless Isolation Forest trainer
@@ -374,10 +381,7 @@ shell_sentry/
 ├── docker/                     # Linux integration harnesses
 ├── config.example.yaml         # Config template
 ├── rules.example.json          # Rules template
-├── README.md                   # This file
-├── Makefile                    # Build / test / daemon / venv targets
-├── justfile                    # Just (Rust make) equivalents
-└── go.mod / go.sum             # Go module definition
+├── README.md · Makefile · justfile · LICENSE
 ```
 
 ## Error Handling

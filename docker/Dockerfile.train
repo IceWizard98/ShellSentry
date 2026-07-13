@@ -4,10 +4,10 @@
 # stays untouched. Build context = repo root.
 FROM golang:1.25-bookworm AS build
 WORKDIR /src
-COPY go.mod go.sum ./
-RUN go mod download
+COPY go/go.mod go/go.sum ./go/
+RUN go -C go mod download
 COPY . .
-RUN CGO_ENABLED=0 go build -o /out/ssentry ./cmd/ssentry
+RUN CGO_ENABLED=0 go -C go build -o /out/ssentry ./cmd/ssentry
 
 FROM debian:bookworm-slim
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -16,7 +16,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 COPY --from=build /out/ssentry /usr/local/bin/ssentry
 # python/ (trainer.py + requirements.txt) must live under the workdir: ssentry
 # train resolves "python/trainer.py" and "python/venv/bin/python" relative to
-# its cwd (ponytail: cwd-relative, run from the repo/deploy root).
+# its cwd, so the harness runs from /work (the repo/deploy root).
 COPY python/trainer.py python/requirements.txt /work/python/
 COPY docker/train_harness.sh /harness/train_harness.sh
 RUN chmod +x /harness/train_harness.sh /usr/local/bin/ssentry
