@@ -342,6 +342,7 @@ shell_sentry/
 - [x] Interactive Docker playground
 - [ ] ForceCommand deployment tooling (systemd unit, install script, hardening)
 - [ ] Nested shell monitoring (syscall interception)
+- [ ] Shell UX: up-arrow history recall, tab completion, `user:path` prompt
 - [ ] Performance work (persistent scorer connection, alert batching)
 
 ## Contributing
