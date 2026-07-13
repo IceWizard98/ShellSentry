@@ -41,7 +41,7 @@ func (a *TOTP) EnsureProvisioned(user string) error {
 	if err != nil {
 		return fmt.Errorf("generate totp: %w", err)
 	}
-	fmt.Fprintln(a.out, "First login — scan this QR in your Authenticator app:")
+	fmt.Fprintln(a.out, "First login. Scan this QR in your Authenticator app:")
 	// Half-block glyphs (not Generate's ANSI-colored full blocks): no color
 	// dependency, half the width/height so it fits an 80-col terminal without
 	// wrapping, and no sixel terminal-probe side effect on stdout.
@@ -50,7 +50,7 @@ func (a *TOTP) EnsureProvisioned(user string) error {
 	fmt.Fprint(a.out, "Have you saved it in your authenticator? Confirm enrollment [y/N]: ")
 
 	if !confirmed(readLine(a.in)) {
-		fmt.Fprintln(a.out, "Enrollment NOT confirmed — secret not saved; you will be prompted again next login.")
+		fmt.Fprintln(a.out, "Enrollment NOT confirmed. Secret not saved; you will be prompted again next login.")
 		return nil
 	}
 	if err := os.MkdirAll(filepath.Dir(p), 0o700); err != nil {
