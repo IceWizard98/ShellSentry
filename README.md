@@ -1,407 +1,361 @@
-# Shell Sentry (`ssentry`)
+<div align="center">
 
-[![Go Version](https://img.shields.io/badge/Go-1.25%2B-00ADD8?logo=go&logoColor=white)](https://go.dev/)
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](./LICENSE)
-[![PRs Welcome](https://img.shields.io/badge/PRs-welcome-brightgreen.svg)](#contributing)
-[![Build](https://img.shields.io/badge/build-go%20build-00ADD8?logo=go&logoColor=white)](#build)
+# Shell Sentry
 
-**A ForceCommand shell wrapper that scores every SSH command for anomalies and gates suspicious activity behind TOTP verification.**
+**Behavioural anomaly detection for SSH sessions.**
+Every command a user runs is scored in real time against how *that user* normally
+behaves, and anything unusual is challenged with a one time code before it runs.
 
-## Overview
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+[![Go](https://img.shields.io/badge/Go-1.25%2B-00ADD8?logo=go&logoColor=white)](https://go.dev)
+[![Python](https://img.shields.io/badge/Python-3.11%2B-3776AB?logo=python&logoColor=white)](https://www.python.org)
+[![Docker playground](https://img.shields.io/badge/Docker-playground-2496ED?logo=docker&logoColor=white)](#try-it-in-one-command)
+[![PRs welcome](https://img.shields.io/badge/PRs-welcome-brightgreen.svg)](#contributing)
 
-Shell Sentry (`ssentry`) is a security-first SSH shell wrapper that runs on the server side to detect and challenge anomalous commands in real time. It combines:
+</div>
 
-- **Per-command anomaly scoring** via a Python inference daemon (Isolation Forest model)
-- **Frequency-encoded behavioural features** (command / country / path all weighted by how often the user does them — common = normal, rare = suspicious)
-- **Novelty gate** (a command / country / path never seen for an already-trained user is challenged in the context of *that user's* history — "you never `sudo`, so this `sudo` is flagged")
-- **Admin pre-filters** (command deny/allow lists, country deny/allow lists, rate limiting)
-- **Adaptive challenges** (TOTP verification for soft/hard anomalies)
-- **Persistent session logging** (per-user SQLite, one session per SSH login)
-- **GeoIP resolution** (MaxMind GeoLite2; influences anomaly scoring)
-- **Admin alerting** (Unix socket, real-time NDJSON alert stream)
+---
 
-## Architecture
+## What it is
 
-Hexagonal: `core/` is pure Go (zero external deps), `ports/` defines contracts, `adapters/` implement them, `cmd/ssentry/` wires everything.
+Shell Sentry (`ssentry`) is a server side wrapper for SSH logins. You wire it in
+as the login's forced command, so it becomes the shell. From that moment it sees
+every command the user types, turns each one into a small behavioural fingerprint
+(what, when, from where, how fast), and asks a per user machine learning model
+whether that fingerprint looks normal. A normal command runs immediately. An
+unusual one, or one that breaks an admin rule, or one the user has literally never
+run before, is gated behind a TOTP challenge. Clean sessions are recorded and
+later become the training data for that user's model, so the system keeps learning.
+
+The runtime is written in Go for a fast, dependency light path on every keystroke.
+The learning and scoring live in a small Python service using scikit learn. The
+two halves talk over a tiny newline delimited JSON protocol on a local socket.
+
+## Try it in one command
+
+The fastest way to understand Shell Sentry is to play with it. This builds a
+throwaway container with a clean user and the scoring daemon already running, then
+drops you into a shell to drive it yourself:
+
+```bash
+make playground        # or:  just playground
+```
+
+Inside the container:
+
+```text
+ssentry run                    # start a MONITORED session
+                               #   first time: a TOTP QR is shown; save it in an
+                               #   authenticator app, then answer [y/N] to confirm.
+                               #   type commands, then `exit` to end (the session
+                               #   is saved). Ctrl-C does NOT drop you out.
+ssentry train --user tester    # once you have a few saved sessions, train a model
+otp                            # print the current TOTP code to answer a challenge
+```
+
+What to watch, from moment zero:
+
+1. First `ssentry run`: no model yet, so every command passes (the learning phase).
+2. Run a handful of sessions with everyday commands, `exit` each one, then train with `ssentry trin --user tester`.
+3. Run again: now a command you have never used, a login from a new country, or an
+   odd hour gets challenged. `mkfs ...` is deny listed and always challenges.
+
+Data persists between runs in a Docker volume, so you can build up history and
+retrain. To start over: `make playground-reset`.
+
+## What it does
+
+- **Per command anomaly scoring** with a per user Isolation Forest model.
+- **Behavioural features**, frequency encoded: the command, the country, and the
+  path are each weighted by how often the user does them. Common looks normal,
+  rare looks suspicious.
+- **A novelty gate**: a command, country, or path that is genuinely new for an
+  already trained user is challenged, judged in the context of that user's own
+  history. You never `sudo`, so this `sudo` is flagged.
+- **Admin rules** as a first filter: command and country allow and deny lists,
+  and a minimum interval between commands. These work even before a model exists.
+- **Adaptive challenges**: soft and hard anomalies both require a TOTP code, with
+  the QR provisioned on first login and only saved after explicit confirmation.
+- **Clean session logging** to a per user SQLite database, used later for training.
+- **Real time admin alerts** streamed as newline delimited JSON on a Unix socket.
+
+## How it works
+
+### Runtime architecture
 
 ```mermaid
 flowchart TD
-    Client([SSH Session · Client])
-    Client --> Wrapper[ssentry · ForceCommand Wrapper]
+    Client([SSH client]) -->|ForceCommand| Wrapper[ssentry run]
 
-    Wrapper --> REPL[Input Loop · REPL]
-    Wrapper --> Proxy[Output Proxy · PTY to SSH]
+    Wrapper --> REPL[Command loop]
+    REPL --> FB[Feature builder<br/>time · geo · command · path · spacing]
 
-    REPL --> FB[Feature Builder<br/>TimeCycle · DetectPath<br/>Dicts lookups · SecsSinceLast]
+    FB --> Rules[Admin rules<br/>deny / allow / rate]
+    FB --> Scorer[Scorer<br/>Python daemon over NDJSON/TCP]
+    FB --> Nov[Novelty gate<br/>never-seen for this user]
 
-    FB --> Rules[Admin Rules<br/>command · country · rate]
-    FB --> Geo[GeoIP Resolver<br/>MaxMind → ISO country]
-    FB --> Scorer[Scorer · ML<br/>Python daemon · NDJSON/TCP<br/>→ anomaly score]
-
-    Rules --> Decide[Decide Severity<br/>soft / hard]
-    Geo --> Decide
+    Rules --> Decide[Decide severity]
     Scorer --> Decide
+    Nov --> Decide
 
-    Decide --> OTP[OTP Challenge<br/>if soft/hard anomaly<br/>QR on 1st login]
-    OTP --> Shell[PTY Shell Executor<br/>persistent pty]
+    Decide -->|soft / hard| OTP[TOTP challenge]
+    Decide -->|normal| Exec
+    OTP -->|pass| Exec[Execute on a persistent PTY shell]
+    OTP -->|fail| Kill[End session, discard]
 
-    Shell -->|Valid=true| Store[(SQLite Store<br/>per-user sessions.db)]
-    Shell --> Alert[[Alert Socket<br/>admin NDJSON feed]]
+    Exec -->|clean exit, valid| Store[(Per-user SQLite)]
+    Exec --> Alerts[[Admin alert socket]]
 ```
 
-### Rule Precedence (decision flow)
+The Go binary owns the session: it reads the command, builds the feature vector,
+consults the rules, the model, and the novelty gate, and only then either runs the
+command on a persistent pseudo terminal or asks for a code. It is hexagonal:
+`core/` is pure logic with zero external dependencies, `ports/` are the interfaces,
+and `adapters/` are the concrete implementations (SQLite, the scorer client,
+MaxMind GeoIP, the TOTP prompt, the PTY shell, the alert socket).
+
+### Decision flow for a single command
 
 ```mermaid
 flowchart TD
-    Cmd([Command line]) --> D{commands.deny or<br/>countries.deny?}
-    D -->|yes| Hard[Hard challenge · OTP required<br/>fail → session invalid]
-    D -->|no| A{commands.allow or<br/>countries.allow?}
-    A -->|yes| Bypass[Bypass · execute<br/>no scoring, no OTP]
-    A -->|no| M{secs since last<br/>&lt; min_seconds_between?}
-    M -->|yes| Soft[Soft challenge · OTP required]
-    M -->|no| Model[Model decides<br/>Isolation Forest scorer]
-    Model --> Sev{score ≤ threshold?}
-    Sev -->|≤ hard| Hard
-    Sev -->|≤ soft| Soft
-    Sev -->|normal| Nov{trained user &amp;<br/>never-seen cmd/country/path?}
-    Nov -->|yes| NovC[Novelty challenge<br/>novelty_severity soft/hard]
-    Nov -->|no| Run[Execute command]
+    Cmd([Command line]) --> D{deny rule?<br/>command or country}
+    D -->|yes| Hard[Hard challenge<br/>OTP required, fail ends session]
+    D -->|no| A{allow rule?}
+    A -->|yes| Run[Execute, no scoring]
+    A -->|no| M{too fast?<br/>min interval}
+    M -->|yes| Soft[Soft challenge]
+    M -->|no| Model{model score}
+    Model -->|score ≤ hard threshold| Hard
+    Model -->|score ≤ soft threshold| Soft
+    Model -->|normal| N{never seen for<br/>this trained user?}
+    N -->|yes| Soft
+    N -->|no| Run
 ```
 
-Severity is the **max** of the model verdict and the novelty gate: a novel item
-never *downgrades* a harder model/rule verdict, but it escalates a
-model-says-normal command to a challenge.
+The final severity is the strongest of the model verdict and the novelty gate. A
+new item never weakens a harder verdict, but it can raise a "the model says fine"
+command to a challenge.
 
-## Quickstart
+### Scoring a command (Go to Python)
 
-### Build
+```mermaid
+sequenceDiagram
+    participant U as User
+    participant S as ssentry (Go)
+    participant D as Daemon (Python)
+    U->>S: cat /etc/passwd
+    S->>S: build features from dicts.json
+    S->>D: {"user","features":{...}}\n
+    D->>D: load user model.pkl (cached, hot-reloaded on retrain)
+    D-->>S: {"score": -0.31}\n
+    S->>S: compare to thresholds.json
+    alt score ≤ threshold
+        S->>U: OTP:
+    else normal
+        S->>U: runs the command
+    end
+```
+
+If the daemon does not answer within the configured budget, `ssentry` fails open
+(treats the command as normal) and alerts, so a slow or missing model never blocks
+the user.
+
+### The learning lifecycle
+
+```mermaid
+flowchart LR
+    Run[ssentry run] -->|clean sessions| DB[(sessions.db)]
+    DB -->|ssentry train| Trainer[Go: retention + encode<br/>Python: fit Isolation Forest]
+    Trainer -->|dicts.json · model.pkl · thresholds.json| Artifacts[(per-user model)]
+    Artifacts -->|hot reload by mtime| Daemon[Inference daemon]
+    Daemon -->|scores| Run
+```
+
+## Why it works this way
+
+- **Per user, not global.** "Unusual" only means something relative to a person's
+  own habits. An admin who runs `sudo` all day and a developer who never does are
+  held to different baselines. The context is the user's own vocabulary.
+- **Frequency encoding, not identifiers.** A raw id (command number 5) carries no
+  meaning for a distance based model. An occurrence count does: common commands
+  form a dense normal region, rare and unseen ones fall into the sparse tail the
+  Isolation Forest flags.
+- **A deterministic novelty gate on top of the model.** An Isolation Forest is
+  trained only on normal data, so it cannot reliably flag a single never seen
+  command on its own. The runtime knows exactly which items are new (index zero
+  against a trained vocabulary), so a small explicit rule covers that case
+  precisely, while the model handles behavioural drift.
+- **Fail open on the hot path.** Security should not lock a legitimate user out
+  because a background service is slow. A scorer timeout is treated as normal and
+  alerted, never as a block.
+- **Go for the session, Python for the maths.** The keystroke path stays fast and
+  self contained; the model lives where scikit learn already does the heavy lifting.
+
+## Full usage
 
 The Go module lives under `./go`, the Python side under `./python`.
 
 ```bash
-make build                              # -> ./ssentry (runs from repo root)
-# or directly:
-go -C go build -o ../ssentry ./cmd/ssentry
+make build        # -> ./ssentry            (or: go -C go build -o ../ssentry ./cmd/ssentry)
+make test         # go -C go test ./...
+make lint         # go -C go vet ./...
+make venv         # create python/venv and install requirements
+make py-test      # python unit tests (daemon, model cache, trainer)
 ```
 
-### Configure
-
-Copy and customize the config and rules:
+Configure:
 
 ```bash
 cp config.example.yaml config.yaml
 cp rules.example.json rules.json
-mkdir -p data
 ```
 
-Download `GeoLite2-Country.mmdb` from MaxMind (free account) into the project root, or update `geoip_db_path` in `config.yaml`.
+Optionally place a `GeoLite2-Country.mmdb` from MaxMind at `geoip_db_path`. Without
+it the geo feature degrades gracefully to "unknown".
 
-### Start the Python Inference Daemon
-
-The daemon scores every command; it must be running before `ssentry` launches.
+Start the scoring daemon (it reads the same `config.yaml`), then run a session:
 
 ```bash
-make venv       # one-time: create python/venv, install deps
-make daemon     # starts python/daemon.py --config config.yaml
+make daemon                                                  # inference service
+SSENTRY_CONFIG=config.yaml SSH_CONNECTION="203.0.113.7 22 10.0.0.1 22" ./ssentry run
 ```
 
-It is a `ThreadingTCPServer` that reads the **same `config.yaml`** as the Go side
-(`daemon_addr`, `root_path`, `model_ttl_sec`). Per user it loads
-`<root_path>/<user>/model.pkl` on demand, caches it in memory, **reloads it
-automatically when a retrain changes the file's mtime**, and evicts models idle
-beyond `model_ttl_sec`. A user with no trained model yet gets a high (normal)
-score, so nothing is challenged; a corrupt model or malformed request closes the
-connection so the runtime fail-opens.
-
-If the daemon runs on a **different host**, give it its own copy of `config.yaml`
-and put `root_path` on a filesystem shared with the trainer (NFS/mount) so both
-sides read the same `model.pkl`.
-
-> **Security — trust boundary:** the daemon `pickle`-loads `model.pkl`, which is
-> arbitrary-code-execution if an attacker can write it. `model.pkl` is trusted
-> **only if the trainer service account is the sole writer of `root_path`** — lock
-> down permissions on `<root_path>/<user>/` (and the shared mount) accordingly.
-> Keep `daemon_addr` on localhost; do not bind `0.0.0.0`. An unusable/corrupt
-> `model.pkl` is deleted on load (the user reverts to untrained until retrained).
-
-For a quick protocol test without a trained model, a one-line mock still works:
+Train a user's model once they have enough recorded sessions:
 
 ```bash
-python3 -c '
-import socket,json
-s=socket.socket(); s.setsockopt(socket.SOL_SOCKET,socket.SO_REUSEADDR,1)
-s.bind(("127.0.0.1",9099)); s.listen()
-while True:
-    c,_=s.accept()
-    f=c.makefile("rw")
-    line=f.readline()
-    f.write(json.dumps({"score":1.0})+"\n"); f.flush(); c.close()
-' &
+./ssentry train --user alice --config config.yaml
 ```
 
-### Run
-
-```bash
-SSENTRY_CONFIG=config.yaml SSH_CONNECTION="8.8.8.8 22 127.0.0.1 22" ./ssentry run
-```
-
-(`ssentry run` is the ForceCommand entrypoint; `ssentry train --user X` retrains a model.)
-
-On first login, you'll see a TOTP QR code and secret. Scan it into an authenticator app.
-
-Then:
+In production, wire `ssentry run` as the forced command for the account:
 
 ```
-ssentry> whoami
-alice
-ssentry> cd /tmp
-ssentry> pwd
-/tmp
-ssentry> exit
+# ~/.ssh/authorized_keys
+command="/usr/local/bin/ssentry run --config /etc/ssentry/config.yaml" ssh-ed25519 AAAA...
 ```
 
-### Verify the Session
-
-Sessions are persisted to per-user SQLite on clean exit:
-
-```bash
-sqlite3 data/$USER/sessions.db "SELECT id, command_count FROM session; SELECT raw_cmd FROM command LIMIT 5;"
-```
+Now `exit` or Ctrl-D ends the monitored session (saving it) and closes SSH. Ctrl-C
+does not drop the user to a raw shell.
 
 ## Configuration
 
-All paths and thresholds are defined in `config.yaml` (copy of `config.example.yaml`).
+All settings live in `config.yaml` (copy of `config.example.yaml`).
 
 | Key | Type | Default | Purpose |
 |-----|------|---------|---------|
-| `root_path` | string | `./data` | Per-user folder root; `<root>/<user>/` holds `sessions.db`, `dicts.json`, `thresholds.json`, `totp.secret` |
-| `geoip_db_path` | string | `./GeoLite2-Country.mmdb` | MaxMind GeoLite2 Country database (binary, ~180 KB) |
-| `daemon_addr` | string | `127.0.0.1:9099` | Python inference daemon TCP address (NDJSON protocol) |
-| `score_timeout_ms` | int | `800` | Max time (ms) to wait for scorer; exceed → fail-open (score=+∞, alert `scorer-timeout`) |
-| `alert_socket` | string | `./data/alerts.sock` | Admin alert stream (Unix domain socket, NDJSON) |
-| `otp_retries` | int | `3` | Max OTP attempts before session invalidates |
-| `rules_path` | string | `./rules.json` | Admin deny/allow rules file (JSON) |
-| `model_ttl_sec` | int | `900` | Model age tolerance (used by trainer; ssentry reads but does not enforce) |
-| `command_timeout_ms` | int | `0` | Per-command wall-clock ceiling; `0` = disabled (keep 0 for interactive use) |
-| `min_sessions_train` | int | `20` | Below this many stored sessions, `ssentry train` skips (not enough data) |
-| `max_sessions_keep` | int | `500` | Above this, the oldest sessions (+ their commands) are pruned before training |
-| `python_bin` | string | `""` | Trainer interpreter; `""` = auto (`python/venv/bin/python`, then `python3`) |
-| `trainer_script` | string | `""` | Path to `trainer.py`; `""` = `./python/trainer.py` |
-| `novelty_severity` | string | `"soft"` | Never-seen command/country/path for a trained user → challenge: `off` \| `soft` \| `hard` (invalid → warns, defaults to soft) |
+| `root_path` | string | `./data` | Per user folder root; holds `sessions.db`, `dicts.json`, `thresholds.json`, `model.pkl`, `totp.secret` |
+| `geoip_db_path` | string | `./GeoLite2-Country.mmdb` | MaxMind GeoLite2 Country database (optional) |
+| `daemon_addr` | string | `127.0.0.1:9099` | Inference daemon address (keep on localhost) |
+| `score_timeout_ms` | int | `800` | Scorer reply budget; exceeding it fails open |
+| `alert_socket` | string | `./data/alerts.sock` | Admin alert stream (Unix socket, NDJSON) |
+| `otp_retries` | int | `3` | OTP attempts before the session is invalidated |
+| `rules_path` | string | `./rules.json` | Admin rules file |
+| `model_ttl_sec` | int | `900` | Daemon in memory model idle eviction |
+| `command_timeout_ms` | int | `0` | Per command ceiling; `0` disables it (recommended for interactive use) |
+| `min_sessions_train` | int | `20` | Below this many saved sessions, training is skipped |
+| `max_sessions_keep` | int | `500` | Above this, the oldest sessions are pruned before training |
+| `python_bin` | string | `""` | Trainer interpreter; empty resolves the venv, then `python3` |
+| `trainer_script` | string | `""` | Trainer path; empty resolves `./python/trainer.py` |
+| `novelty_severity` | string | `soft` | Never seen item for a trained user: `off`, `soft`, or `hard` |
 
-## Training
+## The model, features, and novelty
 
-`ssentry train --user <name>` retrains that user's Isolation Forest from their
-stored sessions:
+Each command becomes six numbers: `time_cos`, `time_sin` (cyclic time of day, so
+23:59 and 00:00 are neighbours), `geo_id`, `cmd_index`, `path_index`, and
+`secs_since_last`.
 
-```bash
-ssentry train --user alice --config /etc/ssentry/config.yaml
-```
+`cmd_index`, `geo_id`, and `path_index` are frequency encoded per user at training
+time: a command run 100 times encodes as 100, a country seen twice as 2, something
+never seen as 0. Common items sit in the dense region the model learns as normal;
+rare and unseen items fall into the sparse tail it flags. The score is high for
+normal and low for anomalous, and `ssentry` challenges when the score is at or
+below the soft (5th percentile) or hard (2nd percentile) threshold saved at
+training time.
 
-Flow: prune the oldest sessions beyond `max_sessions_keep` (cascade-deletes
-their commands) → gate on `min_sessions_train` (skip, no error, if below) →
-rebuild the `command`/`country`/`path` encoders and feature matrix in Go →
-write `<root>/<user>/dicts.json` → hand the numeric matrix to the stateless
-Python trainer (`python/trainer.py`) over stdin, which fits the model and
-writes `model.pkl` + `thresholds.json`.
+Because a model trained only on normal data cannot reliably flag a single unseen
+command on its own, a **novelty gate** complements it: for an already trained user,
+any command, country, or path whose encoded value is 0 (never seen against a non
+empty vocabulary) is raised to `novelty_severity`. A geo lookup that failed is not
+treated as a new country, and a command with no path never triggers path novelty.
+Untrained users are never novelty gated.
 
-Setup:
+## Rules
 
-```bash
-make venv         # creates python/venv and installs python/requirements.txt
-make train-test   # runs the trainer's own test suite
-```
-
-The trainer is **preflighted** before any DB work: `ssentry train` verifies the
-Python interpreter and trainer script exist and that the interpreter can import
-`scikit-learn` + `numpy`, failing fast with a clear error (and leaving the DB
-untouched) if not — so a missing venv never half-runs a training pass.
-
-By default (`python_bin: ""`, `trainer_script: ""`) it resolves
-`python/venv/bin/python` then `python3` on `$PATH`, and `python/trainer.py`,
-relative to the current working directory — so **run it from the repo/deploy
-root**, or set absolute paths for a packaged deployment:
-
-```yaml
-python_bin: "/opt/shell-sentry/venv/bin/python"
-trainer_script: "/opt/shell-sentry/trainer.py"
-```
-
-## Anomaly Model: Features & Novelty
-
-Each command becomes a 6-value feature vector: `time_cos`, `time_sin` (cyclic
-time-of-day, so 23:59 and 00:00 are adjacent), `geo_id`, `cmd_index`,
-`path_index`, and `secs_since_last`.
-
-**Frequency encoding.** `cmd_index`, `geo_id`, and `path_index` are the
-per-user **occurrence counts** rebuilt at training time (a command run 100 times
-→ 100; a country/path seen twice → 2; never seen → 0). A higher count means a
-more common — hence more normal — item, so a rare or unseen item lands in the
-sparse low region the Isolation Forest flags. (An arbitrary id carries no such
-signal, so it is not used.) The model score is high = normal, low = anomalous;
-`ssentry` challenges when `score ≤ soft/hard` (the 5th / 2nd training
-percentiles in `thresholds.json`).
-
-**Novelty gate.** The model cannot reliably flag a *lone* never-seen command by
-itself (it has no such examples in training, and Isolation Forest is blind to how
-far below its training range a value sits). So a deterministic runtime gate
-handles it: for an **already-trained** user (non-empty vocabulary in
-`dicts.json`), a command / country / path whose index is `0` (never seen) raises
-the severity to `novelty_severity` (default `soft`). It is judged in that user's
-own context — `sudo` is novel for someone who never sudos, normal for an admin
-who does. Only a *resolved-but-unknown* country counts (a geo-unavailable lookup
-is not mistaken for a new location); a `no-path` command never triggers path
-novelty. An explicit `commands.allow`/`countries.allow` bypasses it. Untrained
-users (no vocabulary yet) are never novelty-gated. Every trigger emits a
-`novelty` alert.
-
-## Rules Format
-
-Rules are in `rules.json` (copy of `rules.example.json`). They define hard-coded pre-filters:
+`rules.json` (copy of `rules.example.json`) is the admin first filter, effective
+even before any model exists:
 
 ```json
 {
-  "commands": {
-    "deny": ["rm -rf /", "mkfs", "dd"],
-    "allow": ["ls", "pwd", "whoami"]
-  },
+  "commands": { "deny": ["rm -rf /", "mkfs", "dd"], "allow": ["ls", "pwd"] },
   "min_seconds_between": 1,
-  "countries": {
-    "deny": ["KP"],
-    "allow": ["IT", "US"]
-  }
+  "countries": { "deny": ["KP"], "allow": ["IT", "US"] }
 }
 ```
 
-### Precedence
+Precedence: deny (hard challenge) beats allow (bypass) beats the minimum interval
+(soft challenge) beats the model. Command entries match by whitespace token
+prefix, so `mkfs` catches `mkfs /dev/sda`, and the check runs on every segment of
+a compound line (`echo hi && mkfs` is still caught). Command substitution,
+`eval`, and aliases are not parsed, so deny list untrusted interpreters for depth.
 
-1. **Deny** (hard-challenge): `commands.deny` or `countries.deny` → OTP required, fail invalidates session.
-2. **Allow** (bypass all checks): `commands.allow` or `countries.allow` → command executes without scoring or OTP.
-3. **Min-seconds-between** (soft-challenge): fewer than N seconds since last command → OTP required.
-4. **Default** (model decides): if no rule matches, send to Isolation Forest scorer.
+## Security notes
 
-If multiple rules match, the highest precedence wins. (See the decision flow diagram above.)
+- The daemon loads `model.pkl` with `pickle`, which executes code if an attacker
+  can write it. Treat `root_path` as trusted only if the trainer account is its
+  sole writer, and keep `daemon_addr` on localhost.
+- An unusable or corrupt `model.pkl` is deleted on load and the user reverts to
+  untrained, rather than serving a broken model or looping on a bad file.
+- TOTP secrets are stored `0600` and only persisted after the user confirms
+  enrollment, so a dismissed QR is shown again instead of locking the user out.
 
-### Match Semantics
+## Known limitations
 
-- `commands.deny` and `commands.allow` match the **entire raw command line** (whitespace-separated fields).
-- `countries.deny` and `countries.allow` match the ISO country code resolved from the client IP (via MaxMind GeoIP).
+- **Nested shells and multiplexers** (`tmux`, `screen`, `bash`, `ssh`, `docker`)
+  spawn their own shells that bypass the wrapper. Deny list them until in kernel
+  interception (eBPF, auditd) lands.
+- **Shell metacharacters** beyond the top level operators (command substitution,
+  `eval`) are not parsed by the rule pre filter. The model still scores the line.
 
-## Known Limitations
-
-### Multiplexer & Sub-shell Blind Spot
-
-**Problem:** Commands like `tmux`, `screen`, `bash`, `ssh`, `docker` spawn nested shells or multiplexers. Once inside, all sub-commands bypass `ssentry` entirely — we only see the outer command.
-
-**Mitigation:**
-
-1. **Deny-list** these commands in `rules.json` until nested monitoring is available:
-   ```json
-   "deny": ["tmux", "screen", "bash", "sh", "zsh", "python", "perl", "ruby", "ssh", "su", "sudo", "docker"]
-   ```
-
-2. **Future:** Add a second-stage monitor inside the container or use `fanotify` to intercept fork/exec syscalls (not yet implemented).
-
-### Rule Pre-filter: Shell Metacharacter Blind Spot
-
-**Covered:** The rule pre-filter splits each command line on the top-level
-operators `&&`, `||`, `;`, `|`, `&` and checks every segment, so a denied
-command chained after an operator (e.g. `echo hi && mkfs /dev/sda`) is still
-caught.
-
-**Not covered:** command substitution (`$(...)`, backticks), `eval`, and shell
-aliases/functions are **not** parsed — a command hidden inside `$(...)` or run
-via `eval` can still reach the shell without matching a deny entry. This is the
-same class of gap as the nested-shell blind spot; the anomaly model still scores
-the line, and full shell-aware parsing is deferred (roadmap). Deny-list `eval`
-(and untrusted interpreters) for defence in depth.
-
-## Roadmap
-
-- [x] Core feature engineering (time-of-day cycling, path detection)
-- [x] Hexagonal architecture (core, ports, adapters)
-- [x] SQLite session persistence (per-user DB)
-- [x] NDJSON scorer client (TCP to Python daemon)
-- [x] TOTP provisioning + QR codes
-- [x] PTY shell wrapper with sentinel markers
-- [x] Admin alerting (Unix socket NDJSON stream)
-- [x] GeoIP resolution (MaxMind)
-- [x] Config & rules templates
-- [x] **Spec 2:** Python inference daemon (Isolation Forest, NDJSON protocol, mtime-based model reload, TTL cache)
-- [x] **Spec 3:** Python trainer (`ssentry train --user X`; retention + gating in Go, stateless Isolation Forest fit in Python, persist dicts + thresholds)
-- [x] Frequency encoding for command / country / path features
-- [x] Novelty gate (never-seen command/country/path for a trained user)
-- [ ] **Spec 4:** ForceCommand integration (via `~/.ssh/authorized_keys command="/path/to/ssentry run --config /etc/ssentry/config.yaml"`)
-- [ ] Nested-shell monitoring (syscall intercept or container boundary monitor)
-- [ ] Performance optimization (connection pooling, model caching, alert batching)
-
-## Development
-
-```bash
-make test          # go -C go test ./...
-make lint          # go -C go vet ./...
-make build         # -> ./ssentry
-make py-test       # python unit tests (daemon, model_cache, trainer)
-```
-
-## Files & Architecture
+## Project layout
 
 ```
 shell_sentry/
-├── go/                         # Go module (`shellsentry`) — the runtime
-│   ├── core/                    # Pure Go, zero external deps
-│   │   ├── timecycle.go          # Time-of-day cyclic encoding
-│   │   ├── path.go               # Path argument detection
-│   │   ├── feature.go            # Feature builder & dicts
-│   │   ├── decide.go             # Severity decision logic
-│   │   ├── session.go            # Session model
-│   │   ├── rules.go              # Admin rule engine (deny/allow, segment split)
-│   │   ├── complete.go           # Shell-line completeness check (unterminated quote/paren)
-│   │   └── training.go           # Frequency encoders + feature matrix builder
-│   ├── ports/                   # Hexagonal interfaces
-│   │   └── ports.go              # Scorer, Store, GeoResolver, Alerter, OTPVerifier, Shell
-│   ├── adapters/                # Technology-specific implementations
-│   │   ├── sqlitestore/          # Per-user SQLite session persistence
-│   │   ├── scorerclient/         # NDJSON/TCP client to Python daemon
-│   │   ├── geomaxmind/           # MaxMind GeoLite2 Country lookup
-│   │   ├── alertsock/            # Unix socket admin alerter
-│   │   ├── totpauth/             # TOTP verification + first-login QR
-│   │   └── ptyshell/             # PTY-backed persistent shell
-│   ├── cmd/ssentry/             # Main binary (cobra: `run` + `train`)
-│   │   ├── main.go               # Entry point, cobra root, wiring
-│   │   ├── config.go             # YAML config loader
-│   │   ├── repl.go               # REPL orchestrator (the main loop) + novelty gate
-│   │   └── train.go              # `ssentry train`: retention, python preflight, hand-off
-│   └── go.mod / go.sum          # Go module definition
-├── python/                     # Python side (venv) — training + inference
-│   ├── daemon.py                # Inference daemon (ThreadingTCPServer, NDJSON)
-│   ├── model_cache.py           # Per-user model cache (mtime reload, TTL evict)
-│   ├── trainer.py               # Stateless Isolation Forest trainer
-│   └── requirements.txt         # scikit-learn, numpy, pyyaml
-├── docker/                     # Linux integration harnesses
-├── config.example.yaml         # Config template
-├── rules.example.json          # Rules template
-├── README.md · Makefile · justfile · LICENSE
+├── go/                     Go module (shellsentry): the runtime
+│   ├── core/                pure logic (features, rules, decisions, encoders)
+│   ├── ports/               hexagonal interfaces
+│   ├── adapters/            sqlite, scorer client, geoip, totp, pty shell, alerts
+│   └── cmd/ssentry/         the binary (cobra: `run` and `train`)
+├── python/                 training and inference
+│   ├── daemon.py            inference daemon (threaded TCP, NDJSON)
+│   ├── model_cache.py       per-user model cache (mtime reload, TTL)
+│   └── trainer.py           stateless Isolation Forest trainer
+├── docker/                 Linux integration harnesses and the playground
+├── config.example.yaml     rules.example.json
+└── Makefile · justfile · LICENSE
 ```
 
-## Error Handling
+## Roadmap
 
-- Every I/O error is wrapped with `%w` for causal chains.
-- `panic`, `os.Exit`, and `log.Fatal` are forbidden outside `main()`.
-- On scorer timeout, `ssentry` fails open: score is set to `+∞` (normal) and an alert is emitted.
-- On bad TOTP (`otp_retries` exhausted), the session is marked invalid and not persisted.
-- An incomplete shell line (unterminated quote, trailing `\`, open paren) is rejected before execution, so the sentinel is never swallowed as continuation.
-- The daemon deletes an unusable/corrupt `model.pkl` on load (transient I/O errors propagate instead, so a good model is never destroyed by a flaky read).
+- [x] Go runtime: features, rules, PTY shell, TOTP, SQLite, alerts
+- [x] Python inference daemon (Isolation Forest, NDJSON, hot reload, TTL cache)
+- [x] Python trainer with retention and gating (`ssentry train`)
+- [x] Frequency encoding and per user novelty gate
+- [x] Interactive Docker playground
+- [ ] ForceCommand deployment tooling (systemd unit, install script, hardening)
+- [ ] Nested shell monitoring (syscall interception)
+- [ ] Performance work (persistent scorer connection, alert batching)
 
 ## Contributing
 
-Issues and pull requests are very welcome — bug reports, feature ideas, docs fixes, and improvements all help make the product better.
+Contributions are welcome, from bug reports to features to docs. The quickest way
+to form an opinion is `make playground`; short, concrete suggestions from that
+first run are especially valuable.
 
 1. Open an issue to discuss substantial changes first.
-2. Follow the hexagonal discipline (`core/` stays dependency-free; adapters import ports, never the reverse).
-3. TDD: write the failing test first, then the minimal implementation.
-4. Keep commits imperative and scoped (`type: message`, ≤72 chars).
+2. Keep the hexagonal discipline: `core/` stays dependency free, adapters depend
+   on ports and never the reverse.
+3. Test first: a failing test, then the smallest code that passes it.
+4. Keep commits imperative and scoped (`type: message`, 72 characters or fewer).
 
 ## License
 
-Released under the [MIT License](./LICENSE). Use it, fork it, ship it.
+Released under the [MIT License](LICENSE). Use it, fork it, ship it.

@@ -1,0 +1,15 @@
+root_path: "/app/data"
+geoip_db_path: "/app/data/GeoLite2-Country.mmdb"  # run `geo` to download it;
+                                    # absent -> geo degrades gracefully (geo_id 0)
+daemon_addr: "127.0.0.1:9099"
+score_timeout_ms: 800
+alert_socket: "/app/data/alerts.sock"
+otp_retries: 3
+rules_path: "/app/rules.json"
+model_ttl_sec: 900
+command_timeout_ms: 0
+min_sessions_train: 3               # low so you can train after a few sessions
+max_sessions_keep: 100
+python_bin: "/app/python/venv/bin/python"
+trainer_script: "/app/python/trainer.py"
+novelty_severity: "soft"

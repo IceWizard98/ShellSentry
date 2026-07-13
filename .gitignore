@@ -3,6 +3,7 @@
 *.mmdb
 .env
 config.yaml
+!docker/playground/config.yaml
 data/
 diary.md
 CLAUDE.md
