@@ -1,0 +1,11 @@
+{
+  "commands": {
+    "deny": ["mkfs", "rm -rf /", "dd"],
+    "allow": []
+  },
+  "min_seconds_between": 0,
+  "countries": {
+    "deny": [],
+    "allow": []
+  }
+}
