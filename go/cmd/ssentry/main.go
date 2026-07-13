@@ -6,8 +6,10 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"os/signal"
 	"os/user"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -81,6 +83,19 @@ func runCmd() *cobra.Command {
 }
 
 func runSession(cfgPath string) error {
+	// Catch SIGINT so Ctrl-C cannot kill ssentry and drop the user to a raw shell
+	// or abandon an unsaved session — the monitored session must only end via
+	// `exit`/EOF (clean, persisted) or a real disconnect (SIGHUP/SIGTERM, not
+	// persisted). The signal is CAUGHT (not ignored via SIG_IGN): /bin/sh and its
+	// children reset to the default handler on exec, so commands stay
+	// interruptible; ssentry itself just drains it.
+	sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh, syscall.SIGINT)
+	go func() {
+		for range sigCh {
+		}
+	}()
+
 	cfg, err := LoadConfig(cfgPath)
 	if err != nil {
 		return err
@@ -109,7 +124,7 @@ func runSession(cfgPath string) error {
 		defer func() { _ = g.Close() }() // release the mmap'd GeoIP reader
 	}
 
-	otp := totpauth.New(cfg.RootPath, "shellsentry")
+	otp := totpauth.New(cfg.RootPath, "shellsentry", os.Stdin, os.Stdout)
 	if err := otp.EnsureProvisioned(username); err != nil {
 		return err
 	}
