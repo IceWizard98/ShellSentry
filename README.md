@@ -343,6 +343,7 @@ shell_sentry/
 - [ ] ForceCommand deployment tooling (systemd unit, install script, hardening)
 - [ ] Nested shell monitoring (syscall interception)
 - [ ] Shell UX: up-arrow history recall, tab completion, `user:path` prompt
+- [ ] Markov command-sequence model alongside the Isolation Forest
 - [ ] Performance work (persistent scorer connection, alert batching)
 
 ## Contributing
