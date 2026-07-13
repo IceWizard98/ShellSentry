@@ -171,6 +171,32 @@ flowchart LR
     Daemon -->|scores| Run
 ```
 
+### Training performance
+
+Benchmarked on a steady-state history at the `max_sessions_keep` cap (500
+sessions / ~57k commands, random command spacing), a full `ssentry train`:
+
+| Phase | Time |
+|---|---|
+| Isolation Forest fit (the model) | ~1.0 s |
+| Python cold-start + `import sklearn,numpy` (×2: preflight + run) | ~1.4 s |
+| Go: load rows from SQLite + build matrix + JSON marshal | ~2.4 s |
+| Geo resolution of every command IP | ~0.1 s |
+| **End-to-end** | **~5 s** |
+
+The fit scales gently (1.1 s at 5k rows → 1.7 s at 57k), so ~5 s is effectively
+the ceiling — early in a user's life it is ~2–3 s. **The model is not the
+bottleneck**; fixed Python startup and the Go row-load/marshal dominate.
+
+**Training after every session is feasible**, with two caveats:
+
+- Isolation Forest is **batch-only** (no `partial_fit`), so "train at session
+  end" means a *full* retrain of the capped history each time — always ~5 s at
+  steady state, not cheaper by training only the new session.
+- Run it **detached in the background** after the session is persisted so the
+  retrain never blocks logout, and **gate** it (every N sessions or once per X
+  minutes) to avoid retraining on every trivial session.
+
 ## Why it works this way
 
 - **Per user, not global.** "Unusual" only means something relative to a person's
@@ -341,11 +367,17 @@ shell_sentry/
 - [x] Frequency encoding and per user novelty gate
 - [x] Interactive Docker playground
 - [ ] ForceCommand deployment tooling (systemd unit, install script, hardening)
-- [ ] Nested shell monitoring (syscall interception)
+- [ ] Nested shell monitoring via **eBPF** (`execve`/`execveat` tracepoints or an
+      LSM hook) to observe commands run inside nested shells, multiplexers, and
+      interpreters (tmux, bash, ssh, python, …) that bypass the PTY wrapper —
+      closing the multiplexer blind spot documented in [Known limitations](#known-limitations)
 - [ ] Shell UX: up-arrow history recall, tab completion, `user:path` prompt
 - [ ] Markov command-sequence model alongside the Isolation Forest
 - [ ] OTP reset command (`ssentry reset-otp --user X`); optional backup recovery codes
 - [ ] Performance work (persistent scorer connection, alert batching)
+- [ ] Auto-retrain: detached background `ssentry train` after a session is saved,
+      gated per N sessions / X minutes (drop the redundant Python preflight,
+      optional warm trainer to cut cold-start — see [Training performance](#training-performance))
 
 ## Contributing
 
