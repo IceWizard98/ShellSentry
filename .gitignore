@@ -1,5 +1,6 @@
 *.secret
 *.db
+*.mmdb
 .env
 config.yaml
 data/

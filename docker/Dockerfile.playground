@@ -12,7 +12,7 @@ RUN CGO_ENABLED=0 go -C go build -o /out/ssentry ./cmd/ssentry
 
 FROM debian:bookworm-slim
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    python3 python3-venv ca-certificates sqlite3 procps \
+    python3 python3-venv ca-certificates sqlite3 procps curl gzip \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
@@ -25,11 +25,14 @@ RUN python3 -m venv /app/python/venv \
 COPY --from=build /out/ssentry /usr/local/bin/ssentry
 COPY docker/playground/entrypoint.sh /usr/local/bin/entrypoint
 COPY docker/playground/otp.sh /usr/local/bin/otp
+COPY docker/playground/geo.sh /usr/local/bin/geo
+COPY scripts/fetch-geoip.sh /usr/local/bin/fetch-geoip
 COPY docker/playground/alert_reader.py /app/python/alert_reader.py
 COPY docker/playground/config.yaml /app/config.yaml
 COPY docker/playground/rules.json /app/rules.json
 
-RUN chmod +x /usr/local/bin/entrypoint /usr/local/bin/otp /usr/local/bin/ssentry \
+RUN chmod +x /usr/local/bin/entrypoint /usr/local/bin/otp /usr/local/bin/geo \
+    /usr/local/bin/fetch-geoip /usr/local/bin/ssentry \
     && mkdir -p /app/data \
     && useradd -m -s /bin/bash tester \
     && chown -R tester:tester /app

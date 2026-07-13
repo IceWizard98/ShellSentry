@@ -14,7 +14,7 @@ sleep 1
 
 cat <<'MOTD'
 ============================================================
-  Shell Sentry — PLAYGROUND   (user: tester, clean state)
+  Shell Sentry  PLAYGROUND   (user: tester, clean state)
 ============================================================
 Nothing is trained yet. The inference daemon is already running.
 Drive it yourself, from moment 0:
@@ -24,7 +24,7 @@ Drive it yourself, from moment 0:
                               in an authenticator, then answer [y/N] to confirm
                               enrollment. If you DON'T confirm, nothing is saved
                               and the QR is shown again next login. After that,
-                              type commands; `exit` (or Ctrl-D) to end — a clean
+                              type commands; `exit` (or Ctrl-D) to end. A clean
                               session is saved to the per-user DB. Ctrl-C does
                               NOT drop you out of ssentry (it stays in control);
                               only `exit`/EOF ends the monitored session. In
@@ -36,6 +36,12 @@ Drive it yourself, from moment 0:
 
   otp                         print the current TOTP code (answer challenges;
                               handy from a second `docker exec -it <c> otp`).
+
+  geo                         download the free geo database (DB-IP Country
+                              Lite). Without it geo_id is always 0 ("country
+                              unknown") and that feature is dead, so the
+                              detector runs "half". Run once, then `ssentry run`
+                              uses it.
 
 Things to try:
   * First `ssentry run`: no model -> every command passes (learning phase).
