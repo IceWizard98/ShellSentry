@@ -344,6 +344,7 @@ shell_sentry/
 - [ ] Nested shell monitoring (syscall interception)
 - [ ] Shell UX: up-arrow history recall, tab completion, `user:path` prompt
 - [ ] Markov command-sequence model alongside the Isolation Forest
+- [ ] OTP reset command (`ssentry reset-otp --user X`); optional backup recovery codes
 - [ ] Performance work (persistent scorer connection, alert batching)
 
 ## Contributing
