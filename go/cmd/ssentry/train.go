@@ -26,7 +26,8 @@ type sessionStore interface {
 }
 
 // trainCmd retrains the per-user Isolation Forest from stored sessions:
-//   ssentry train --user alice --config /etc/ssentry/config.yaml
+//
+//	ssentry train --user alice --config /etc/ssentry/config.yaml
 func trainCmd() *cobra.Command {
 	var cfgPath, user string
 	c := &cobra.Command{

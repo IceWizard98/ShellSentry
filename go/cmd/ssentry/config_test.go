@@ -75,11 +75,11 @@ func TestLoadConfig_PythonParams(t *testing.T) {
 
 func TestNoveltySev(t *testing.T) {
 	cases := map[string]core.Severity{
-		"":       core.SevSoft, // unset -> soft
-		"soft":   core.SevSoft,
-		"hard":   core.SevHard,
-		"off":    core.SevNone,
-		"SOFT":   core.SevSoft, // invalid -> warn + default soft (not fatal)
+		"":         core.SevSoft, // unset -> soft
+		"soft":     core.SevSoft,
+		"hard":     core.SevHard,
+		"off":      core.SevNone,
+		"SOFT":     core.SevSoft, // invalid -> warn + default soft (not fatal)
 		"nonsense": core.SevSoft,
 	}
 	for in, want := range cases {
