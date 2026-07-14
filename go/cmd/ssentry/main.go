@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/spf13/cobra"
+	"golang.org/x/term"
 
 	"shellsentry/adapters/alertsock"
 	"shellsentry/adapters/geomaxmind"
@@ -61,7 +62,8 @@ func rootCmd() *cobra.Command {
 }
 
 // runCmd is the per-session runtime: set it as the SSH ForceCommand, e.g.
-//   ForceCommand /usr/local/bin/ssentry run --config /etc/ssentry/config.yaml
+//
+//	ForceCommand /usr/local/bin/ssentry run --config /etc/ssentry/config.yaml
 func runCmd() *cobra.Command {
 	var cfgPath string
 	c := &cobra.Command{
@@ -140,16 +142,16 @@ func runSession(cfgPath string) error {
 	defer shell.Close()
 
 	d := Deps{
-		Scorer:       scorerclient.New(cfg.DaemonAddr),
-		Store:        sqlitestore.New(cfg.RootPath),
-		Geo:          geo,
-		Alerter:      alertsock.New(cfg.AlertSocket),
-		OTP:          otp,
-		Shell:        shell,
-		Rules:        rules,
-		Dicts:        dicts,
-		SoftThr:      softThr,
-		HardThr:      hardThr,
+		Scorer:          scorerclient.New(cfg.DaemonAddr),
+		Store:           sqlitestore.New(cfg.RootPath),
+		Geo:             geo,
+		Alerter:         alertsock.New(cfg.AlertSocket),
+		OTP:             otp,
+		Shell:           shell,
+		Rules:           rules,
+		Dicts:           dicts,
+		SoftThr:         softThr,
+		HardThr:         hardThr,
 		OTPRetries:      cfg.OTPRetries,
 		ScoreTimeout:    cfg.ScoreTimeoutDur(),
 		Now:             func() int64 { return time.Now().Unix() },
@@ -157,10 +159,28 @@ func runSession(cfgPath string) error {
 	}
 
 	// Single tty owner: os.Stdin feeds BOTH the command prompt and the OTP
-	// prompt via an UNBUFFERED byte-wise reader (see readLine). No bufio: a
-	// read-ahead buffer would steal type-ahead bytes from ptyshell, which reads
-	// the same raw fd directly during RunCommand (breaking vi/top/etc.).
-	s := RunREPL(username, ip, sessionID, os.Stdin, os.Stdout, os.Stdin, d)
+	// prompt. On a real tty we drive term.Terminal (line history via up/down,
+	// Tab autocomplete) over an UNBUFFERED 1-byte reader so it never reads past a
+	// newline — otherwise it would steal type-ahead bytes from ptyshell, which
+	// reads the same raw fd directly during RunCommand (breaking vi/top/etc.).
+	// Off a tty (tests, pipes) we fall back to the plain byte-wise reader.
+	var lr LineReader
+	if term.IsTerminal(int(os.Stdin.Fd())) {
+		// Put the outer tty in raw mode for the whole REPL: term.Terminal owns
+		// echo/editing at the prompt. Set AFTER OTP provisioning (which runs in
+		// cooked mode for QR + first code) and BEFORE the loop. ptyshell toggles
+		// its own per-command raw mode and restores to this state (makeRawPolling
+		// captures the current termios), so this stays in effect between commands.
+		old, err := term.MakeRaw(int(os.Stdin.Fd()))
+		if err != nil {
+			return fmt.Errorf("set terminal raw mode: %w", err)
+		}
+		defer func() { _ = term.Restore(int(os.Stdin.Fd()), old) }()
+		lr = newTermLineReader(os.Stdin, os.Stdout, dicts)
+	} else {
+		lr = &plainLineReader{in: os.Stdin, out: os.Stdout}
+	}
+	s := RunREPL(username, ip, sessionID, lr, d)
 	// Persist only clean, non-empty sessions: a session with no commands (e.g.
 	// the user connected and immediately exited, or first-login provisioning)
 	// carries no training signal and would only clutter the per-user DB.

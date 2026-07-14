@@ -93,17 +93,22 @@ func (d Deps) alert(user, sid, sev, reason, detail string) {
 
 // RunREPL runs the command loop until EOF/exit. Returns the session; caller
 // saves it iff s.Valid.
-func RunREPL(user, ip, sessionID string, in io.Reader, out io.Writer, otpIn io.Reader, d Deps) *core.Session {
+func RunREPL(user, ip, sessionID string, lr LineReader, d Deps) *core.Session {
 	country, _ := d.Geo.Country(ip) // "" on unknown; error path already returns ""
 	s := core.NewSession(d.Now())
 	// Command spacing is measured with a monotonic clock (time.Now carries a
 	// monotonic reading) so an NTP wall-clock step back cannot make elapsed
 	// negative. d.Now() is kept for the stored wall-clock session timestamps.
 	lastCmdTime := time.Now()
+	// Per-session cache of command lines the user has already authorized with a
+	// correct OTP (only HARD events are challenged, so only those populate it).
+	// An identical line later in the SAME session skips the re-challenge.
+	// In-memory only (cleared at logout) so a stolen OTP cannot whitelist a
+	// command beyond the session.
+	authorized := map[string]bool{}
 
 	for {
-		fmt.Fprint(out, "ssentry> ")
-		line, err := readLine(in)
+		line, err := lr.ReadLine("ssentry> ")
 		line = strings.TrimRight(line, "\r\n")
 		if line == "exit" || (err == io.EOF && line == "") {
 			break
@@ -119,7 +124,7 @@ func RunREPL(user, ip, sessionID string, in io.Reader, out io.Writer, otpIn io.R
 		// backslash, open paren) before injecting it: otherwise the appended
 		// sentinel would be swallowed as continuation and RunCommand would hang.
 		if ok, reason := core.LineComplete(line); !ok {
-			fmt.Fprintf(out, "ssentry: incomplete command (%s); not executed\n", reason)
+			fmt.Fprintf(lr, "ssentry: incomplete command (%s); not executed\n", reason)
 			if err == io.EOF {
 				break
 			}
@@ -169,11 +174,26 @@ func RunREPL(user, ip, sessionID string, in io.Reader, out io.Writer, otpIn io.R
 			}
 		}
 
-		if sev != core.SevNone {
-			if !d.challenge(user, sessionID, sev, otpIn, out) {
-				s.Valid = false
-				d.alert(user, sessionID, "bad-otp", "otp failed", line)
-				break
+		// Challenge policy: a SOFT anomaly is logged only; OTP is required solely
+		// for a HARD event (admin deny, model score <= hard threshold, or a
+		// novelty gate configured hard). Deny always maps to SevHard, so it can
+		// never be downgraded to log-only.
+		switch sev {
+		case core.SevSoft:
+			d.alert(user, sessionID, "soft-log", "soft anomaly logged", line)
+		case core.SevHard:
+			// An identical hard command already OTP-authorized this session is
+			// not re-challenged (see `authorized`). Every SevHard is content-based
+			// (deny/model/novelty), so any hard pass is eligible for the cache.
+			if authorized[line] {
+				d.alert(user, sessionID, "otp-cached", "prior OTP authorization reused", line)
+			} else {
+				if !d.challenge(user, sessionID, sev, lr) {
+					s.Valid = false
+					d.alert(user, sessionID, "bad-otp", "otp failed", line)
+					break
+				}
+				authorized[line] = true
 			}
 		}
 
@@ -210,14 +230,13 @@ func (d Deps) scoreSeverity(user, sid string, feat core.Feature) core.Severity {
 
 // challenge prompts for OTP up to OTPRetries; true = passed. On pass, emits a
 // soft/hard alert; the session stays valid.
-func (d Deps) challenge(user, sid string, sev core.Severity, otpIn io.Reader, out io.Writer) bool {
+func (d Deps) challenge(user, sid string, sev core.Severity, lr LineReader) bool {
 	sevName := "soft-otp"
 	if sev == core.SevHard {
 		sevName = "hard-otp"
 	}
 	for i := 0; i < d.OTPRetries; i++ {
-		fmt.Fprint(out, "OTP: ")
-		code, readErr := readLine(otpIn)
+		code, readErr := lr.ReadLine("OTP: ")
 		code = strings.TrimSpace(code)
 		// EOF with no data typed = the tty was closed / session abandoned.
 		// Stop immediately instead of busy-looping through every retry.
