@@ -10,6 +10,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"os/signal"
 	"strconv"
 	"strings"
 	"sync"
@@ -55,7 +56,8 @@ type Shell struct {
 	userOut    io.Writer
 	nonce      string
 	nextID     int
-	cmdTimeout time.Duration // 0 = no per-command wall-clock ceiling
+	cmdTimeout time.Duration  // 0 = no per-command wall-clock ceiling
+	winch      chan os.Signal // SIGWINCH feed; nil when userTty is not a tty
 }
 
 // New spawns /bin/sh -i on a new PTY. userOut receives the command output
@@ -83,14 +85,40 @@ func New(nonce string, userTty *os.File, userOut io.Writer, cmdTimeout time.Dura
 		_ = c.Process.Kill()
 		return nil, fmt.Errorf("ptyshell: set pty raw mode: %w", err)
 	}
-	return &Shell{
+	// term.MakeRaw clears OPOST, which drops the NL->CR-NL output translation.
+	// The outer user tty is ALSO in raw mode (main sets it for term.Terminal),
+	// so with both sides raw a bare LF from the shell moves the cursor down but
+	// not to column 0 — every line stair-steps to the right and the prompt lands
+	// mid-line. Re-enable OPOST|ONLCR on the pty so the shell's output carries
+	// proper CR-LFs before we forward it. Best-effort: on failure output just
+	// keeps stair-stepping, no crash.
+	if t, err := unix.IoctlGetTermios(int(ptmx.Fd()), ioctlGetTermios); err == nil {
+		t.Oflag |= unix.OPOST | unix.ONLCR
+		_ = unix.IoctlSetTermios(int(ptmx.Fd()), ioctlSetTermios, t)
+	}
+	sh := &Shell{
 		cmd:        c,
 		ptmx:       ptmx,
 		userTty:    userTty,
 		userOut:    userOut,
 		nonce:      nonce,
 		cmdTimeout: cmdTimeout,
-	}, nil
+	}
+	// Size the pty to the real terminal so `ls`/full-screen apps format for the
+	// user's actual columns (default is 80). Keep it in sync on window resize;
+	// ssentry sessions are long-lived SSH shells. No-op when userTty is not a
+	// terminal (tests, pipes).
+	if userTty != nil && term.IsTerminal(int(userTty.Fd())) {
+		_ = pty.InheritSize(userTty, ptmx)
+		sh.winch = make(chan os.Signal, 1)
+		signal.Notify(sh.winch, unix.SIGWINCH)
+		go func() {
+			for range sh.winch {
+				_ = pty.InheritSize(userTty, ptmx)
+			}
+		}()
+	}
+	return sh, nil
 }
 
 // readByte reads one byte from the pty master using a short read deadline and
@@ -183,7 +211,7 @@ func (s *Shell) RunCommand(line string) (int, error) {
 	// full-screen interactive programs render live) while holding back a
 	// trailing window that could still turn out to be the start of the marker.
 	var acc strings.Builder
-	echoStripped := false
+	echoHandled := false
 	flushed := 0 // index in acc up to which bytes are already written to userOut
 	var deadline time.Time
 	if s.cmdTimeout > 0 {
@@ -202,18 +230,25 @@ func (s *Shell) RunCommand(line string) (int, error) {
 		full := acc.String()
 		idx := strings.Index(full, marker)
 		if idx < 0 {
-			// Stream everything except a trailing window that might be a
-			// partial marker. Once the leading echoed command line is
-			// stripped, forward the safe prefix live.
-			if !echoStripped {
-				if i := strings.Index(full, "\n"); i >= 0 && strings.Contains(full[:i], line) {
-					flushed = i + 1
-					echoStripped = true
-				} else {
-					continue // still buffering the echo line
+			// Skip a leading echo of the injected command IF the interactive
+			// shell echoed it — some do, dash on a raw pty does not. The echo,
+			// when present, is the shell repeating our injected bytes, so while
+			// the stream is still a prefix of `inject` it may be echo-in-progress
+			// and we hold. As soon as it diverges (or the very first byte already
+			// differs — a full-screen program's leading ESC), the echo is over:
+			// drop the echoed line if we can spot it, then stream live. This
+			// NEVER blocks waiting for an echo that will not come, so vi/top/nano
+			// render immediately instead of freezing.
+			if !echoHandled {
+				if strings.HasPrefix(inject, full) {
+					continue // still possibly inside the echoed command line
 				}
+				if i := strings.Index(full, "\n"); i >= 0 && strings.Contains(full[:i], line) {
+					flushed = i + 1 // drop the echoed line and its newline
+				}
+				echoHandled = true
 			}
-			safe := len(full) - len(marker) // keep marker-length tail back
+			safe := len(full) - markerPrefixHold(full, marker)
 			if safe > flushed {
 				if _, err := io.WriteString(s.userOut, full[flushed:safe]); err != nil {
 					return 0, fmt.Errorf("ptyshell: write user output: %w", err)
@@ -244,7 +279,7 @@ func (s *Shell) RunCommand(line string) (int, error) {
 		// Flush any output between what we already streamed and the marker.
 		// output == full[:idx]; bytes [flushed:idx] are the not-yet-written
 		// tail (held-back partial-marker window + anything before echo strip).
-		if !echoStripped {
+		if !echoHandled {
 			output = stripEcho(output, line)
 			flushed = 0
 		}
@@ -257,6 +292,25 @@ func (s *Shell) RunCommand(line string) (int, error) {
 	}
 }
 
+// markerPrefixHold returns how many trailing bytes of s to withhold from the
+// live stream because they could be the START of marker (a sentinel split
+// across reads). It is 0 in the common case, so a full-screen program (vi, top)
+// that draws a screen and then blocks on input renders live instead of stalling
+// on a withheld tail. Bounded by len(marker)-1: a full match is handled by the
+// caller's strings.Index path.
+func markerPrefixHold(s, marker string) int {
+	max := len(marker) - 1
+	if max > len(s) {
+		max = len(s)
+	}
+	for n := max; n > 0; n-- {
+		if strings.HasPrefix(marker, s[len(s)-n:]) {
+			return n
+		}
+	}
+	return 0
+}
+
 // stripEcho drops the leading echoed command line that the -i shell prints
 // back before the command's own output.
 func stripEcho(output, line string) string {
@@ -267,12 +321,14 @@ func stripEcho(output, line string) string {
 }
 
 // proxyInput copies user-tty keystrokes into the pty master until done is
-// closed. The tty is in VMIN=0/VTIME=1 raw mode (see makeRawPolling), so a
-// read with no input available returns n=0 after ~100ms; the loop then checks
-// done. This yields the tty promptly once the command finishes without
-// consuming bytes intended for the next command's cooked-mode read, and
-// without a Go read deadline (which deadlocks the poller in raw mode on
-// macOS/BSD).
+// closed. The tty is in VMIN=0/VTIME=1 raw mode (see makeRawPolling): an idle
+// read returns (0, io.EOF) after ~100ms because Go maps a zero-byte tty read to
+// io.EOF. That is the poll TICK, not real end of input — it MUST NOT stop
+// forwarding, or the user can no longer type into interactive programs (vi,
+// top) after the first idle moment. So we ignore the read error entirely, write
+// through whatever bytes we got, and exit only via `done` (command finished) or
+// a pty write failure (shell gone). The ~100ms VTIME cadence paces idle reads,
+// so this does not busy-spin while the tty stays open.
 func (s *Shell) proxyInput(done <-chan struct{}, wg *sync.WaitGroup) {
 	defer wg.Done()
 	buf := make([]byte, 1024)
@@ -282,16 +338,12 @@ func (s *Shell) proxyInput(done <-chan struct{}, wg *sync.WaitGroup) {
 			return
 		default:
 		}
-		n, err := s.userTty.Read(buf)
+		n, _ := s.userTty.Read(buf)
 		if n > 0 {
-			_, _ = s.ptmx.Write(buf[:n])
-		}
-		if err != nil {
-			// EOF/real error: stop forwarding but stay alive until done so the
-			// main loop's deferred wg.Wait does not block on a dead goroutine
-			// racing the sentinel.
-			<-done
-			return
+			if _, err := s.ptmx.Write(buf[:n]); err != nil {
+				<-done // shell gone; stay alive until the caller closes done
+				return
+			}
 		}
 	}
 }
@@ -299,6 +351,10 @@ func (s *Shell) proxyInput(done <-chan struct{}, wg *sync.WaitGroup) {
 // Close terminates the persistent shell: requests a graceful exit, closes
 // the PTY, then kills and waits on the process to avoid leaking it.
 func (s *Shell) Close() error {
+	if s.winch != nil {
+		signal.Stop(s.winch)
+		close(s.winch)
+	}
 	_, _ = io.WriteString(s.ptmx, "exit\n")
 	_ = s.ptmx.Close()
 	if s.cmd.Process != nil {

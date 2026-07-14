@@ -100,6 +100,11 @@ func (l *termLineReader) ReadLine(prompt string) (string, error) {
 
 func (l *termLineReader) Write(b []byte) (int, error) { return l.t.Write(b) }
 
+// SetSize tells the line editor the real terminal dimensions so its cursor and
+// line-wrap model match the tty (term.Terminal otherwise assumes 80 columns,
+// misplacing the prompt after wide command output).
+func (l *termLineReader) SetSize(w, h int) { _ = l.t.SetSize(w, h) }
+
 // candidates returns the sorted, de-duplicated command-name set for Tab
 // completion: the trained vocabulary plus commands typed this session.
 func (l *termLineReader) candidates() []string {

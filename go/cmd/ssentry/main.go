@@ -176,7 +176,24 @@ func runSession(cfgPath string) error {
 			return fmt.Errorf("set terminal raw mode: %w", err)
 		}
 		defer func() { _ = term.Restore(int(os.Stdin.Fd()), old) }()
-		lr = newTermLineReader(os.Stdin, os.Stdout, dicts)
+		tlr := newTermLineReader(os.Stdin, os.Stdout, dicts)
+		// Size the line editor to the real terminal (default is 80) and keep it in
+		// sync on window resize, so the prompt lands at the right column after wide
+		// command output. ptyshell sizes the pty itself (see ptyshell.New).
+		if w, h, err := term.GetSize(int(os.Stdin.Fd())); err == nil {
+			tlr.SetSize(w, h)
+		}
+		winch := make(chan os.Signal, 1)
+		signal.Notify(winch, syscall.SIGWINCH)
+		defer signal.Stop(winch)
+		go func() {
+			for range winch {
+				if w, h, err := term.GetSize(int(os.Stdin.Fd())); err == nil {
+					tlr.SetSize(w, h)
+				}
+			}
+		}()
+		lr = tlr
 	} else {
 		lr = &plainLineReader{in: os.Stdin, out: os.Stdout}
 	}
