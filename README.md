@@ -4,7 +4,8 @@
 
 **Behavioural anomaly detection for SSH sessions.**
 Every command a user runs is scored in real time against how *that user* normally
-behaves, and anything unusual is challenged with a one time code before it runs.
+behaves. A mild deviation is logged; a strong one is challenged with a one time
+code before it runs.
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Go](https://img.shields.io/badge/Go-1.25%2B-00ADD8?logo=go&logoColor=white)](https://go.dev)
@@ -22,10 +23,10 @@ Shell Sentry (`ssentry`) is a server side wrapper for SSH logins. You wire it in
 as the login's forced command, so it becomes the shell. From that moment it sees
 every command the user types, turns each one into a small behavioural fingerprint
 (what, when, from where, how fast), and asks a per user machine learning model
-whether that fingerprint looks normal. A normal command runs immediately. An
-unusual one, or one that breaks an admin rule, or one the user has literally never
-run before, is gated behind a TOTP challenge. Clean sessions are recorded and
-later become the training data for that user's model, so the system keeps learning.
+whether that fingerprint looks normal. A normal command runs immediately. A mildly
+unusual one is logged and still runs; a strongly anomalous one, or one that breaks
+an admin deny rule, is gated behind a TOTP challenge. Clean sessions are recorded
+and later become the training data for that user's model, so the system keeps learning.
 
 The runtime is written in Go for a fast, dependency light path on every keystroke.
 The learning and scoring live in a small Python service using scikit learn. The
@@ -58,7 +59,8 @@ What to watch, from moment zero:
 1. First `ssentry run`: no model yet, so every command passes (the learning phase).
 2. Run a handful of sessions with everyday commands, `exit` each one, then train with `ssentry trin --user tester`.
 3. Run again: now a command you have never used, a login from a new country, or an
-   odd hour gets challenged. `mkfs ...` is deny listed and always challenges.
+   odd hour is flagged — logged if mildly off (soft), or TOTP-challenged if strongly
+   anomalous (hard). `mkfs ...` is deny listed and always hard-challenges.
 
 Data persists between runs in a Docker volume, so you can build up history and
 retrain. To start over: `make playground-reset`.
@@ -70,12 +72,15 @@ retrain. To start over: `make playground-reset`.
   path are each weighted by how often the user does them. Common looks normal,
   rare looks suspicious.
 - **A novelty gate**: a command, country, or path that is genuinely new for an
-  already trained user is challenged, judged in the context of that user's own
+  already trained user is flagged at `novelty_severity` (logged if soft, TOTP if
+  hard), judged in the context of that user's own
   history. You never `sudo`, so this `sudo` is flagged.
 - **Admin rules** as a first filter: command and country allow and deny lists,
   and a minimum interval between commands. These work even before a model exists.
-- **Adaptive challenges**: soft and hard anomalies both require a TOTP code, with
-  the QR provisioned on first login and only saved after explicit confirmation.
+- **Two-tier response**: a soft anomaly is logged only; a hard anomaly requires a
+  TOTP code, with the QR provisioned on first login and only saved after explicit
+  confirmation. An identical hard command re-authorized once is not re-challenged
+  for the rest of the session.
 - **Clean session logging** to a per user SQLite database, used later for training.
 - **Real time admin alerts** streamed as newline delimited JSON on a Unix socket.
 
@@ -98,8 +103,10 @@ flowchart TD
     Scorer --> Decide
     Nov --> Decide
 
-    Decide -->|soft / hard| OTP[TOTP challenge]
+    Decide -->|hard| OTP[TOTP challenge]
+    Decide -->|soft| Log[Log alert only]
     Decide -->|normal| Exec
+    Log --> Exec
     OTP -->|pass| Exec[Execute on a persistent PTY shell]
     OTP -->|fail| Kill[End session, discard]
 
@@ -123,7 +130,7 @@ flowchart TD
     D -->|no| A{allow rule?}
     A -->|yes| Run[Execute, no scoring]
     A -->|no| M{too fast?<br/>min interval}
-    M -->|yes| Soft[Soft challenge]
+    M -->|yes| Soft[Soft: log alert only, runs]
     M -->|no| Model{model score}
     Model -->|score ≤ hard threshold| Hard
     Model -->|score ≤ soft threshold| Soft
@@ -134,7 +141,8 @@ flowchart TD
 
 The final severity is the strongest of the model verdict and the novelty gate. A
 new item never weakens a harder verdict, but it can raise a "the model says fine"
-command to a challenge.
+command to soft or hard (per `novelty_severity`). Only a **hard** final severity
+asks for a TOTP code; a **soft** one is logged and the command runs.
 
 ### Scoring a command (Go to Python)
 
@@ -149,8 +157,10 @@ sequenceDiagram
     D->>D: load user model.pkl (cached, hot-reloaded on retrain)
     D-->>S: {"score": -0.31}\n
     S->>S: compare to thresholds.json
-    alt score ≤ threshold
+    alt score ≤ hard threshold
         S->>U: OTP:
+    else score ≤ soft threshold
+        S->>S: log soft-log alert, run
     else normal
         S->>U: runs the command
     end
@@ -293,9 +303,9 @@ Each command becomes six numbers: `time_cos`, `time_sin` (cyclic time of day, so
 time: a command run 100 times encodes as 100, a country seen twice as 2, something
 never seen as 0. Common items sit in the dense region the model learns as normal;
 rare and unseen items fall into the sparse tail it flags. The score is high for
-normal and low for anomalous, and `ssentry` challenges when the score is at or
-below the soft (5th percentile) or hard (2nd percentile) threshold saved at
-training time.
+normal and low for anomalous. A score at or below the soft (5th percentile)
+threshold is logged only; at or below the hard (2nd percentile) threshold it asks
+for a TOTP code. Both thresholds are saved at training time.
 
 Because a model trained only on normal data cannot reliably flag a single unseen
 command on its own, a **novelty gate** complements it: for an already trained user,
@@ -317,8 +327,8 @@ even before any model exists:
 }
 ```
 
-Precedence: deny (hard challenge) beats allow (bypass) beats the minimum interval
-(soft challenge) beats the model. Command entries match by whitespace token
+Precedence: deny (hard, OTP required) beats allow (bypass) beats the minimum
+interval (soft, logged only) beats the model. Command entries match by whitespace token
 prefix, so `mkfs` catches `mkfs /dev/sda`, and the check runs on every segment of
 a compound line (`echo hi && mkfs` is still caught). Command substitution,
 `eval`, and aliases are not parsed, so deny list untrusted interpreters for depth.
