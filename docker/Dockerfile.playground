@@ -12,7 +12,7 @@ RUN CGO_ENABLED=0 go -C go build -o /out/ssentry ./cmd/ssentry
 
 FROM debian:bookworm-slim
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    python3 python3-venv ca-certificates sqlite3 procps curl gzip \
+    python3 python3-venv ca-certificates sqlite3 procps curl gzip vim nano less \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
