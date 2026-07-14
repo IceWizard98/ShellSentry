@@ -23,7 +23,8 @@ func (f fakeScorer) Score(context.Context, string, string, core.Feature) (float6
 
 type fakeShell struct {
 	ran []string
-	err error // if set, RunCommand returns it without recording the line
+	cwd string // reported by Cwd (empty -> prompt degrades to no-dir)
+	err error  // if set, RunCommand returns it without recording the line
 }
 
 func (f *fakeShell) RunCommand(line string) (int, error) {
@@ -33,7 +34,8 @@ func (f *fakeShell) RunCommand(line string) (int, error) {
 	f.ran = append(f.ran, line)
 	return 0, nil
 }
-func (f *fakeShell) Close() error { return nil }
+func (f *fakeShell) Cwd() (string, error) { return f.cwd, nil }
+func (f *fakeShell) Close() error         { return nil }
 
 type fakeOTP struct{ ok bool }
 
@@ -77,6 +79,29 @@ func baseDeps() Deps {
 // by concatenating the command stream and any OTP stream.
 func lineReader(streams ...io.Reader) LineReader {
 	return &plainLineReader{in: io.MultiReader(streams...), out: io.Discard}
+}
+
+func TestBuildPrompt(t *testing.T) {
+	cases := []struct {
+		name             string
+		user, host, home string
+		cwd              string
+		want             string
+	}{
+		{"home compresses to tilde", "alice", "srv", "/home/alice", "/home/alice", "[ssentry] alice@srv:~$ "},
+		{"under home", "alice", "srv", "/home/alice", "/home/alice/dev", "[ssentry] alice@srv:~/dev$ "},
+		{"outside home", "alice", "srv", "/home/alice", "/tmp", "[ssentry] alice@srv:/tmp$ "},
+		{"empty cwd degrades to no-dir", "alice", "srv", "/home/alice", "", "[ssentry] alice@srv$ "},
+		{"home not a prefix-hijack", "alice", "srv", "/home/alice", "/home/alice2", "[ssentry] alice@srv:/home/alice2$ "},
+		{"empty home never compresses", "alice", "srv", "", "/tmp", "[ssentry] alice@srv:/tmp$ "},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := buildPrompt(c.user, c.host, c.home, c.cwd); got != c.want {
+				t.Fatalf("buildPrompt = %q, want %q", got, c.want)
+			}
+		})
+	}
 }
 
 func TestREPL_NormalCommand_Executes_SessionValid(t *testing.T) {

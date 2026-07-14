@@ -288,7 +288,98 @@ func (s *Shell) RunCommand(line string) (int, error) {
 				return 0, fmt.Errorf("ptyshell: write user output: %w", err)
 			}
 		}
+		s.drainMarkerEOL()
 		return code, nil
+	}
+}
+
+// drainMarkerEOL consumes the newline the sentinel printf emits after the
+// closing RS byte. With ONLCR on the pty that newline is "\r\n"; left unread it
+// surfaces as a blank line at the start of the NEXT command's output (the marker
+// terminator is protocol, not user output, so all of it must be consumed).
+// Bounded to the "\r\n" it always produces, and best-effort: a read error just
+// leaves the loop, since the caller has already got its exit code.
+func (s *Shell) drainMarkerEOL() {
+	for i := 0; i < 2; i++ {
+		b, err := s.readByte()
+		if err != nil {
+			return
+		}
+		if b == '\n' {
+			return
+		}
+		if b != '\r' {
+			return // unexpected (format guarantees CR/LF); don't swallow real output
+		}
+	}
+}
+
+// Cwd returns the shell's current working directory by running a silent `pwd`
+// (output captured, not streamed to userOut). It lets the REPL render a
+// contextual prompt and complete file paths against the shell's real directory
+// — which the persistent /bin/sh owns and mutates via `cd`, invisibly to us.
+// Safe to call only between commands (no RunCommand in flight): the REPL builds
+// the prompt before reading a line and completes on Tab while the read blocks,
+// so the ptmx is never read concurrently.
+func (s *Shell) Cwd() (string, error) {
+	out, _, err := s.runCaptured("pwd")
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(stripEcho(out, "pwd")), nil
+}
+
+// runCaptured injects line with the sentinel like RunCommand, but accumulates
+// all output into a string instead of streaming it to userOut, and runs no
+// input proxy / raw-mode toggle (it is for internal, non-interactive queries
+// such as `pwd`). Returns the captured output (echo included) and exit code.
+func (s *Shell) runCaptured(line string) (string, int, error) {
+	s.nextID++
+	id := s.nextID
+
+	marker := fmt.Sprintf("\x1e%s%d\x1e", s.nonce, id)
+	markerLiteral := fmt.Sprintf(`\036%s%d\036`, s.nonce, id)
+	inject := fmt.Sprintf("%s; printf '%s%%d\\036\\n' $?\n", line, markerLiteral)
+	if _, err := io.WriteString(s.ptmx, inject); err != nil {
+		return "", 0, fmt.Errorf("ptyshell: inject captured command: %w", err)
+	}
+
+	var acc strings.Builder
+	var deadline time.Time
+	if s.cmdTimeout > 0 {
+		deadline = time.Now().Add(s.cmdTimeout)
+	}
+	for {
+		if !deadline.IsZero() && time.Now().After(deadline) {
+			return "", 0, fmt.Errorf("ptyshell: captured command produced no sentinel within %s", s.cmdTimeout)
+		}
+		b, err := s.readByte()
+		if err != nil {
+			return "", 0, fmt.Errorf("ptyshell: read pty: %w", err)
+		}
+		acc.WriteByte(b)
+
+		full := acc.String()
+		idx := strings.Index(full, marker)
+		if idx < 0 {
+			continue
+		}
+		output := full[:idx]
+		rest := full[idx+len(marker):]
+		for !strings.Contains(rest, "\x1e") {
+			b2, err := s.readByte()
+			if err != nil {
+				return "", 0, fmt.Errorf("ptyshell: read exit code: %w", err)
+			}
+			rest += string(b2)
+		}
+		exitStr := rest[:strings.Index(rest, "\x1e")]
+		code, convErr := strconv.Atoi(strings.TrimSpace(exitStr))
+		if convErr != nil {
+			return "", 0, fmt.Errorf("ptyshell: parse exit code %q: %w", exitStr, convErr)
+		}
+		s.drainMarkerEOL()
+		return output, code, nil
 	}
 }
 

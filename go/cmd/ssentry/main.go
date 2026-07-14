@@ -110,6 +110,8 @@ func runSession(cfgPath string) error {
 	username := u.Username
 	ip := clientIP() // from SSH_CONNECTION
 	sessionID := fmt.Sprintf("%d", time.Now().UnixNano())
+	host, _ := os.Hostname() // "" on error -> prompt shows user@ only
+	home := u.HomeDir        // compressed to "~" in the prompt
 
 	novSev := cfg.NoveltySev()
 	dicts, softThr, hardThr := loadUserArtifacts(cfg.RootPath, username)
@@ -156,6 +158,8 @@ func runSession(cfgPath string) error {
 		ScoreTimeout:    cfg.ScoreTimeoutDur(),
 		Now:             func() int64 { return time.Now().Unix() },
 		NoveltySeverity: novSev,
+		Host:            host,
+		HomeDir:         home,
 	}
 
 	// Single tty owner: os.Stdin feeds BOTH the command prompt and the OTP
@@ -176,7 +180,7 @@ func runSession(cfgPath string) error {
 			return fmt.Errorf("set terminal raw mode: %w", err)
 		}
 		defer func() { _ = term.Restore(int(os.Stdin.Fd()), old) }()
-		tlr := newTermLineReader(os.Stdin, os.Stdout, dicts)
+		tlr := newTermLineReader(os.Stdin, os.Stdout, dicts, shell.Cwd, home)
 		// Size the line editor to the real terminal (default is 80) and keep it in
 		// sync on window resize, so the prompt lands at the right column after wide
 		// command output. ptyshell sizes the pty itself (see ptyshell.New).

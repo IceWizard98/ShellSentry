@@ -3,6 +3,8 @@ package main
 import (
 	"fmt"
 	"io"
+	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 
@@ -68,11 +70,13 @@ func (o oneByteReader) Read(p []byte) (int, error) {
 type termLineReader struct {
 	t     *term.Terminal
 	dicts core.Dicts
-	seen  []string // first words typed this session (autocomplete source)
+	seen  []string               // first words typed this session (autocomplete source)
+	cwdFn func() (string, error) // shell cwd for file completion; nil disables it
+	home  string                 // for "~" expansion in path completion
 }
 
-func newTermLineReader(in io.Reader, out io.Writer, d core.Dicts) *termLineReader {
-	lr := &termLineReader{dicts: d}
+func newTermLineReader(in io.Reader, out io.Writer, d core.Dicts, cwdFn func() (string, error), home string) *termLineReader {
+	lr := &termLineReader{dicts: d, cwdFn: cwdFn, home: home}
 	rw := struct {
 		io.Reader
 		io.Writer
@@ -82,7 +86,20 @@ func newTermLineReader(in io.Reader, out io.Writer, d core.Dicts) *termLineReade
 		if key != '\t' {
 			return "", 0, false
 		}
-		return completeFirstWord(line, pos, lr.candidates())
+		// First word (nothing but the cursor's token before it) -> complete a
+		// command name. Otherwise -> complete a filesystem path against the
+		// shell's cwd. `cd `/`cat ` etc. land in the path branch.
+		if pos > 0 && strings.IndexByte(line[:pos], ' ') == -1 {
+			return completeFirstWord(line, pos, lr.candidates())
+		}
+		if lr.cwdFn == nil {
+			return "", 0, false
+		}
+		cwd, err := lr.cwdFn()
+		if err != nil {
+			return "", 0, false
+		}
+		return completePath(line, pos, cwd, lr.home)
 	}
 	return lr
 }
@@ -156,6 +173,95 @@ func completeFirstWord(line string, pos int, candidates []string) (string, int, 
 		return "", 0, false // ambiguous, no forward progress
 	}
 	return lcp + rest, len(lcp), true
+}
+
+// completePath completes the path token under the cursor against the real
+// filesystem, resolving relative tokens against cwd (the shell's working
+// directory) and a leading "~" against home. Directory matches get a trailing
+// "/" (so a second Tab descends into them); a unique file match gets a trailing
+// space. It completes only up to the longest common prefix when ambiguous, and
+// returns ok=false on no match, an unreadable directory, or an empty cwd for a
+// relative token. Whitespace-tokenized (no shell-quote handling), matching
+// core.SplitCommand's documented simplification.
+func completePath(line string, pos int, cwd, home string) (string, int, bool) {
+	tokenStart := strings.LastIndexByte(line[:pos], ' ') + 1
+	token := line[tokenStart:pos]
+	rest := line[pos:]
+
+	// Split the token into the directory part (kept verbatim for display) and
+	// the base being completed; resolve the directory part to a real fs path.
+	var displayDir, base, fsDir string
+	if slash := strings.LastIndexByte(token, '/'); slash >= 0 {
+		displayDir = token[:slash+1]
+		base = token[slash+1:]
+		fsDir = expandDir(displayDir, cwd, home)
+	} else {
+		base = token
+		fsDir = cwd
+	}
+	if fsDir == "" {
+		return "", 0, false // relative token but shell cwd unknown
+	}
+
+	entries, err := os.ReadDir(fsDir)
+	if err != nil {
+		return "", 0, false
+	}
+	var matches []string
+	for _, e := range entries {
+		name := e.Name()
+		// Hide dotfiles unless the user explicitly typed a leading dot.
+		if !strings.HasPrefix(base, ".") && strings.HasPrefix(name, ".") {
+			continue
+		}
+		if !strings.HasPrefix(name, base) {
+			continue
+		}
+		if e.IsDir() {
+			name += "/"
+		}
+		matches = append(matches, name)
+	}
+	if len(matches) == 0 {
+		return "", 0, false
+	}
+
+	var completed string
+	if len(matches) == 1 {
+		completed = matches[0]
+		if !strings.HasSuffix(completed, "/") {
+			completed += " " // unique file: advance past it
+		}
+	} else {
+		lcp := longestCommonPrefix(matches)
+		if len(lcp) <= len(base) {
+			return "", 0, false // ambiguous, no forward progress
+		}
+		completed = lcp
+	}
+
+	newLine := line[:tokenStart] + displayDir + completed
+	return newLine + rest, len(newLine), true
+}
+
+// expandDir resolves a token's directory part to an absolute filesystem path:
+// a leading "~/" against home, an absolute path as-is, and a relative path
+// against cwd. Returns "" when it cannot resolve (relative with empty cwd).
+func expandDir(displayDir, cwd, home string) string {
+	switch {
+	case strings.HasPrefix(displayDir, "~/"):
+		if home == "" {
+			return ""
+		}
+		return filepath.Join(home, displayDir[2:])
+	case strings.HasPrefix(displayDir, "/"):
+		return displayDir
+	default:
+		if cwd == "" {
+			return ""
+		}
+		return filepath.Join(cwd, displayDir)
+	}
 }
 
 func longestCommonPrefix(ss []string) string {

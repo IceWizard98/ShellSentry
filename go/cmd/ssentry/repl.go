@@ -53,6 +53,28 @@ type Deps struct {
 	// NoveltySeverity escalates a command/country/path that is new to an already
 	// trained user (index 0 vs a non-empty vocabulary). SevNone = off.
 	NoveltySeverity core.Severity
+	// Host and HomeDir feed the contextual prompt "[ssentry] user@host:dir$ ".
+	// HomeDir is compressed to "~" when it prefixes the shell's cwd.
+	Host    string
+	HomeDir string
+}
+
+// buildPrompt renders the contextual REPL prompt "[ssentry] user@host:dir$ ".
+// dir is the shell cwd with home compressed to "~"; an empty cwd (Cwd failed)
+// degrades to "[ssentry] user@host$ " rather than showing a bogus directory.
+func buildPrompt(user, host, home, cwd string) string {
+	if cwd == "" {
+		return fmt.Sprintf("[ssentry] %s@%s$ ", user, host)
+	}
+	dir := cwd
+	if home != "" {
+		if cwd == home {
+			dir = "~"
+		} else if strings.HasPrefix(cwd, home+"/") {
+			dir = "~" + cwd[len(home):]
+		}
+	}
+	return fmt.Sprintf("[ssentry] %s@%s:%s$ ", user, host, dir)
 }
 
 // noveltySeverity returns a severity (and a reason) when the command, country,
@@ -108,7 +130,8 @@ func RunREPL(user, ip, sessionID string, lr LineReader, d Deps) *core.Session {
 	authorized := map[string]bool{}
 
 	for {
-		line, err := lr.ReadLine("ssentry> ")
+		cwd, _ := d.Shell.Cwd() // best-effort; "" degrades to a no-dir prompt
+		line, err := lr.ReadLine(buildPrompt(user, d.Host, d.HomeDir, cwd))
 		line = strings.TrimRight(line, "\r\n")
 		if line == "exit" || (err == io.EOF && line == "") {
 			break

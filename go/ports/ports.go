@@ -47,5 +47,9 @@ type OTPVerifier interface {
 // proxies raw I/O until the sentinel marker, returns its exit code.
 type Shell interface {
 	RunCommand(line string) (exitCode int, err error)
+	// Cwd returns the shell's current working directory (silent `pwd`), so the
+	// REPL can render a contextual prompt and complete file paths against the
+	// real directory. Best-effort: the caller degrades gracefully on error.
+	Cwd() (string, error)
 	Close() error
 }

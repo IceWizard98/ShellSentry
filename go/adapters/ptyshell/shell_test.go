@@ -3,6 +3,7 @@ package ptyshell
 import (
 	"bytes"
 	"os"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -149,6 +150,68 @@ func TestRunCommand_ExitCodeAndStatePersists(t *testing.T) {
 	}
 	if !bytes.Contains(out.Bytes(), []byte("/tmp")) {
 		t.Fatalf("cwd did not persist; out=%q", out.String())
+	}
+}
+
+// TestRunCommand_NoLeadingBlankLine guards the sentinel-newline leak: the
+// marker printf ends with a newline (expanded to CR-LF by ONLCR) that must be
+// consumed, or it surfaces as a blank line at the start of the NEXT command's
+// output. A zero-output command followed by another command is the trigger.
+func TestRunCommand_NoLeadingBlankLine(t *testing.T) {
+	var out bytes.Buffer
+	devnull, _ := os.Open(os.DevNull)
+	defer devnull.Close()
+
+	sh, err := New("TESTNONCE", devnull, &out, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer sh.Close()
+
+	if _, err := sh.RunCommand("true"); err != nil { // no output, marker only
+		t.Fatalf("true: %v", err)
+	}
+	out.Reset()
+	if _, err := sh.RunCommand("printf hello"); err != nil {
+		t.Fatalf("printf: %v", err)
+	}
+	got := out.String()
+	if strings.HasPrefix(got, "\n") || strings.HasPrefix(got, "\r") {
+		t.Fatalf("stray newline leaked from previous marker: %q", got)
+	}
+	if !strings.Contains(got, "hello") {
+		t.Fatalf("output = %q, want to contain hello", got)
+	}
+}
+
+// TestCwd_ReturnsShellDir verifies Cwd tracks the persistent shell's directory:
+// after a `cd`, Cwd reflects the new location (silent pwd, output not streamed).
+func TestCwd_ReturnsShellDir(t *testing.T) {
+	var out bytes.Buffer
+	devnull, _ := os.Open(os.DevNull)
+	defer devnull.Close()
+
+	sh, err := New("TESTNONCE", devnull, &out, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer sh.Close()
+
+	if _, err := sh.RunCommand("cd /tmp"); err != nil {
+		t.Fatalf("cd: %v", err)
+	}
+	out.Reset()
+	cwd, err := sh.Cwd()
+	if err != nil {
+		t.Fatalf("Cwd: %v", err)
+	}
+	// macOS resolves /tmp -> /private/tmp; match either.
+	if !strings.Contains(cwd, "/tmp") {
+		t.Fatalf("Cwd = %q, want to contain /tmp", cwd)
+	}
+	// Silent: the pwd query must not leak into the user output stream.
+	if out.Len() != 0 {
+		t.Fatalf("Cwd must not write to userOut; got %q", out.String())
 	}
 }
 
