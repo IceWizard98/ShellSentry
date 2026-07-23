@@ -11,6 +11,18 @@ import (
 	"github.com/creack/pty"
 )
 
+func TestStripEcho_KeepsOutputContainingCommandName(t *testing.T) {
+	// Echoed injected line starts with the command -> stripped.
+	if got := stripEcho("pwd; printf x\n/home/x\n", "pwd"); got != "/home/x\n" {
+		t.Fatalf("echo not stripped: %q", got)
+	}
+	// No echo (dash on a raw pty): the first output line merely CONTAINS the
+	// command name (a cwd like /home/pwd) -> must NOT be stripped.
+	if got := stripEcho("/home/pwd\n", "pwd"); got != "/home/pwd\n" {
+		t.Fatalf("wrongly stripped output: %q", got)
+	}
+}
+
 func TestMarkerPrefixHold(t *testing.T) {
 	marker := "\x1eabc9\x1e"
 	cases := []struct {

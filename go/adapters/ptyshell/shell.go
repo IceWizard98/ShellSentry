@@ -243,7 +243,7 @@ func (s *Shell) RunCommand(line string) (int, error) {
 				if strings.HasPrefix(inject, full) {
 					continue // still possibly inside the echoed command line
 				}
-				if i := strings.Index(full, "\n"); i >= 0 && strings.Contains(full[:i], line) {
+				if i := strings.Index(full, "\n"); i >= 0 && strings.HasPrefix(full[:i], line) {
 					flushed = i + 1 // drop the echoed line and its newline
 				}
 				echoHandled = true
@@ -405,7 +405,10 @@ func markerPrefixHold(s, marker string) int {
 // stripEcho drops the leading echoed command line that the -i shell prints
 // back before the command's own output.
 func stripEcho(output, line string) string {
-	if i := strings.Index(output, "\n"); i >= 0 && strings.Contains(output[:i], line) {
+	// HasPrefix (not Contains): the echo is the injected line, which STARTS with
+	// `line`; a mere substring match would wrongly strip real output whose first
+	// line happens to contain the command name (e.g. a cwd like /home/pwd).
+	if i := strings.Index(output, "\n"); i >= 0 && strings.HasPrefix(output[:i], line) {
 		return output[i+1:]
 	}
 	return output
