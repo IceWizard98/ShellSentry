@@ -19,6 +19,16 @@ type Config struct {
 	OTPRetries   int    `yaml:"otp_retries"`
 	RulesPath    string `yaml:"rules_path"`
 	ModelTTLSec  int    `yaml:"model_ttl_sec"`
+	// ModelHMACKeyPath is a root-owned key file shared by trainer and daemon. When
+	// set, the trainer signs model.pkl and the daemon refuses to load an unsigned
+	// or forged model — closing the pickle-exec vector opened by a user-writable
+	// model dir. Empty = no signing (legacy).
+	ModelHMACKeyPath string `yaml:"model_hmac_key_path"`
+	// OTPSocket is the unix socket of the privileged otpd; the session connects to
+	// it to provision/validate OTP. OTPRoot is otpd's root-owned secret store,
+	// kept OUTSIDE root_path so the scored user can never read their own secret.
+	OTPSocket string `yaml:"otp_socket"`
+	OTPRoot   string `yaml:"otp_root"`
 	// CommandTimeoutMs is a per-command wall-clock ceiling (0 = disabled). It is
 	// a backstop for a command that never emits its sentinel; leave it 0 for
 	// interactive use (long-running vi/builds), set it for non-interactive

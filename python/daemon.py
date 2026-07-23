@@ -11,6 +11,7 @@ fail-opens."""
 import argparse
 import json
 import os
+import re
 import socketserver
 import sys
 import threading
@@ -22,6 +23,17 @@ from model_cache import ModelCache
 # Column order MUST match training (core.BuildMatrix) and the runtime feature.
 FEATURE_ORDER = ["time_cos", "time_sin", "geo_id",
                  "cmd_index", "path_index", "secs_since_last"]
+
+# A user maps directly onto <root>/<user>/model.pkl, so it must not carry a path
+# separator or dot-component. This mirrors Go's core.ValidUsername; the daemon is
+# the more exposed boundary (req["user"] is attacker-controlled JSON).
+_USER_RE = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9_.-]*$")
+
+
+def valid_user(user):
+    # The regex already rejects "", ".", ".." (leading char must be alnum/_) and
+    # anything with "/" or "\".
+    return isinstance(user, str) and bool(_USER_RE.match(user))
 
 # Cap a single request line so a client cannot make us buffer unbounded memory
 # by sending bytes without a newline (symmetric with the Go client's 1 MiB
@@ -39,18 +51,40 @@ def load_config(path):
     p = int(port)
     if not (1 <= p <= 65535):  # reject 0 (silently ephemeral) and out-of-range
         raise ValueError(f"daemon_addr port must be 1-65535, got {p}")
+    # Optional HMAC key: when set, models must be signed to be loaded (see
+    # ModelCache). Read at startup so a missing/empty key file fails fast rather
+    # than silently disabling verification.
+    key_path = str(cfg.get("model_hmac_key_path") or "")
+    hmac_key = None
+    if key_path:
+        with open(key_path, "rb") as f:
+            hmac_key = f.read()
+        if not hmac_key:
+            raise ValueError(f"model_hmac_key_path {key_path!r} is empty")
     return {
         "host": host or "127.0.0.1",
         "port": p,
         "root": cfg.get("root_path", "./data"),
         "ttl": int(cfg.get("model_ttl_sec", 900)),
+        "hmac_key": hmac_key,
     }
 
 
 def process(cache, req):
+    user = req["user"]
+    if not valid_user(user):
+        raise ValueError(f"invalid user {user!r}")  # -> caught -> connection closed
+    # Generation guard: if the runtime sent its login-time gen and it no longer
+    # matches the on-disk model (retrained mid-session), refuse to score so the Go
+    # client fail-opens rather than compare a fresh model against stale encoders.
+    req_gen = req.get("gen")
+    if req_gen is not None:
+        mgen = cache.model_gen(user)
+        if mgen is not None and mgen != req_gen:
+            raise ValueError(f"gen mismatch req={req_gen} model={mgen}")
     feats = req["features"]
     vec = [float(feats[k]) for k in FEATURE_ORDER]  # KeyError if a field is missing
-    return {"score": cache.score(req["user"], vec)}
+    return {"score": cache.score(user, vec)}
 
 
 class Handler(socketserver.StreamRequestHandler):
@@ -88,7 +122,7 @@ class _Server(socketserver.ThreadingTCPServer):
 
 
 def serve(cfg, cache=None):
-    cache = cache or ModelCache(cfg["root"], cfg["ttl"])
+    cache = cache or ModelCache(cfg["root"], cfg["ttl"], hmac_key=cfg.get("hmac_key"))
     srv = _Server((cfg["host"], cfg["port"]), Handler)
     srv.cache = cache
     stop = threading.Event()

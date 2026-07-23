@@ -37,16 +37,20 @@ func readLine(r io.Reader) (string, error) {
 }
 
 type Deps struct {
-	Scorer       ports.Scorer
-	Store        ports.Store
-	Geo          ports.GeoResolver
-	Alerter      ports.Alerter
-	OTP          ports.OTPVerifier
-	Shell        ports.Shell
-	Rules        core.Rules
-	Dicts        core.Dicts
-	SoftThr      float64
-	HardThr      float64
+	Scorer  ports.Scorer
+	Store   ports.Store
+	Geo     ports.GeoResolver
+	Alerter ports.Alerter
+	OTP     ports.OTPVerifier
+	Shell   ports.Shell
+	Rules   core.Rules
+	Dicts   core.Dicts
+	SoftThr float64
+	HardThr float64
+	// Gen is the artifact generation loaded at login (from thresholds.json). Sent
+	// on every score request so the daemon can reject a model reloaded mid-session
+	// whose generation no longer matches these encoders/thresholds.
+	Gen          int64
 	OTPRetries   int
 	ScoreTimeout time.Duration
 	Now          func() int64
@@ -243,7 +247,7 @@ func RunREPL(user, ip, sessionID string, lr LineReader, d Deps) *core.Session {
 func (d Deps) scoreSeverity(user, sid string, feat core.Feature) core.Severity {
 	ctx, cancel := context.WithTimeout(context.Background(), d.ScoreTimeout)
 	defer cancel()
-	score, err := d.Scorer.Score(ctx, user, sid, feat)
+	score, err := d.Scorer.Score(ctx, user, sid, feat, d.Gen)
 	if err != nil {
 		d.alert(user, sid, "scorer-timeout", "scorer unavailable", err.Error())
 		score = math.Inf(1) // fail-open: high = normal

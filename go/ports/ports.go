@@ -6,9 +6,11 @@ import (
 )
 
 // Scorer talks to the Python inference daemon. Score returns the raw model
-// score (high = normal). On timeout/err the REPL substitutes +Inf itself.
+// score (high = normal). On timeout/err the REPL substitutes +Inf itself. gen is
+// the runtime's login-time artifact generation; the daemon refuses to score (and
+// the REPL fail-opens) when it no longer matches the loaded model's generation.
 type Scorer interface {
-	Score(ctx context.Context, user, sessionID string, f core.Feature) (float64, error)
+	Score(ctx context.Context, user, sessionID string, f core.Feature, gen int64) (float64, error)
 }
 
 // Store persists a validated session to the per-user SQLite DB.

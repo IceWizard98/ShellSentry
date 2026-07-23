@@ -34,7 +34,7 @@ func fakeDaemon(t *testing.T, score float64, delay time.Duration) string {
 func TestScore_ReturnsDaemonScore(t *testing.T) {
 	addr := fakeDaemon(t, 0.42, 0)
 	c := New(addr)
-	got, err := c.Score(context.Background(), "alice", "s1", core.Feature{})
+	got, err := c.Score(context.Background(), "alice", "s1", core.Feature{}, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -48,7 +48,7 @@ func TestScore_TimeoutReturnsError(t *testing.T) {
 	c := New(addr)
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
 	defer cancel()
-	if _, err := c.Score(ctx, "alice", "s1", core.Feature{}); err == nil {
+	if _, err := c.Score(ctx, "alice", "s1", core.Feature{}, 0); err == nil {
 		t.Fatal("expected timeout error")
 	}
 }

@@ -4,6 +4,9 @@ Loads <root>/<user>/model.pkl on demand, reloads when the file's mtime changes
 (so a retrain is picked up without a restart), and evicts entries idle beyond a
 TTL. Thread-safe: the cache dict is guarded by a lock; scoring runs outside the
 lock (numpy/sklearn release the GIL)."""
+import hashlib
+import hmac
+import json
 import os
 import pickle
 import sys
@@ -16,21 +19,54 @@ NO_MODEL_SCORE = 1e9
 
 
 class ModelCache:
-    def __init__(self, root, ttl_sec, now=time.monotonic):
+    def __init__(self, root, ttl_sec, now=time.monotonic, hmac_key=None):
         self._root = root
         self._ttl = ttl_sec
         self._now = now
+        # When set, model.pkl is loaded ONLY if <path>.hmac matches an HMAC-SHA256
+        # over its bytes with this key. Since a scored user owns their own model
+        # dir, an unsigned/forged pickle is a code-exec vector; a mismatch is
+        # refused (never unpickled). None = no verification (legacy deploys).
+        self._hmac_key = hmac_key
         self._lock = threading.Lock()
         self._entries = {}  # user -> {"model", "key": (mtime, size), "atime"}
 
     def _model_path(self, user):
-        return os.path.join(self._root, user, "model.pkl")
+        # Defence in depth against a path-traversing user (the daemon also
+        # validates before calling): the resolved per-user dir must stay under
+        # root, else refuse rather than read an arbitrary pickle off disk.
+        base = os.path.realpath(os.path.join(self._root, user))
+        root = os.path.realpath(self._root)
+        if base != root and not base.startswith(root + os.sep):
+            raise ValueError(f"user path escapes root: {user!r}")
+        return os.path.join(base, "model.pkl")
+
+    def _hmac_ok(self, path, raw):
+        # Returns True iff <path>.hmac exists and matches HMAC-SHA256(key, raw).
+        try:
+            with open(path + ".hmac", "r") as f:
+                want = f.read().strip()
+        except OSError:
+            return False
+        got = hmac.new(self._hmac_key, raw, hashlib.sha256).hexdigest()
+        return hmac.compare_digest(got, want)
 
     def score(self, user, features):
         model = self._get_model(user)
         if model is None:
             return NO_MODEL_SCORE
         return float(model.score_samples([features])[0])
+
+    def model_gen(self, user):
+        # Generation id of the on-disk model (from model.meta.json), or None if
+        # absent/unreadable. Lets the daemon reject a request whose runtime-side
+        # encoders/thresholds no longer match the reloaded model.
+        meta = os.path.join(os.path.dirname(self._model_path(user)), "model.meta.json")
+        try:
+            with open(meta) as f:
+                return json.load(f).get("gen")
+        except (OSError, ValueError):
+            return None
 
     def _get_model(self, user):
         now = self._now()
@@ -51,10 +87,26 @@ class ModelCache:
                 return entry["model"]
 
         # Slow path: load OUTSIDE the lock so a slow/large load doesn't serialize
-        # every other user's lookups behind it.
+        # every other user's lookups behind it. Read the bytes ONCE, then verify
+        # + deserialize from those same bytes (no TOCTOU between check and load).
+        # An OSError here (transient I/O, model.pkl is a dir) deliberately
+        # propagates — it must never destroy a good model.
+        with open(path, "rb") as f:
+            raw = f.read()
+
+        # HMAC gate: an unsigned or forged model is refused (NOT deleted — it may
+        # be a legacy/migration model or a transient sidecar loss, and deleting a
+        # possibly-good model on a signature miss would be its own footgun).
+        if self._hmac_key is not None and not self._hmac_ok(path, raw):
+            sys.stderr.write(
+                f"model_cache: HMAC verification failed for {path}; refusing to load\n")
+            sys.stderr.flush()
+            with self._lock:
+                self._entries.pop(user, None)
+            return None
+
         try:
-            with open(path, "rb") as f:
-                model = pickle.load(f)
+            model = pickle.loads(raw)
             if not hasattr(model, "score_samples"):
                 raise ValueError(f"model for {user!r} lacks score_samples")
         except (pickle.UnpicklingError, EOFError, ValueError,

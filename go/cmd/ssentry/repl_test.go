@@ -13,11 +13,13 @@ import (
 )
 
 type fakeScorer struct {
-	score float64
-	err   error
+	score  float64
+	err    error
+	gotGen int64
 }
 
-func (f fakeScorer) Score(context.Context, string, string, core.Feature) (float64, error) {
+func (f *fakeScorer) Score(_ context.Context, _, _ string, _ core.Feature, gen int64) (float64, error) {
+	f.gotGen = gen
 	return f.score, f.err
 }
 
@@ -67,7 +69,7 @@ func (fakeGeo) Country(string) (string, error) { return "", nil }
 
 func baseDeps() Deps {
 	return Deps{
-		Scorer: fakeScorer{score: 1.0}, Shell: &fakeShell{},
+		Scorer: &fakeScorer{score: 1.0}, Shell: &fakeShell{},
 		OTP: fakeOTP{ok: true}, Alerter: &fakeAlerter{}, Geo: fakeGeo{},
 		SoftThr: 0.05, HardThr: 0.02, OTPRetries: 3,
 		ScoreTimeout: time.Second, Now: func() int64 { return 1000 },
@@ -154,7 +156,7 @@ func TestNopGeo_UnknownCountry(t *testing.T) {
 
 func TestREPL_ScorerTimeout_FailsOpen_Alerts(t *testing.T) {
 	d := baseDeps()
-	d.Scorer = fakeScorer{err: errors.New("timeout")}
+	d.Scorer = &fakeScorer{err: errors.New("timeout")}
 	al := d.Alerter.(*fakeAlerter)
 	in := strings.NewReader("ls /x\n")
 	s := RunREPL("alice", "1.2.3.4", "s1", lineReader(in), d)
@@ -174,12 +176,22 @@ func TestREPL_ScorerTimeout_FailsOpen_Alerts(t *testing.T) {
 
 func TestREPL_AnomalousScore_GoodOTP_StaysValid(t *testing.T) {
 	d := baseDeps()
-	d.Scorer = fakeScorer{score: 0.01} // below hard
+	d.Scorer = &fakeScorer{score: 0.01} // below hard
 	in := strings.NewReader("nmap 10.0.0.0/8\n")
 	otp := strings.NewReader("123456\n")
 	s := RunREPL("alice", "1.2.3.4", "s1", lineReader(in, otp), d)
 	if !s.Valid || len(s.Commands) != 1 {
 		t.Fatalf("good OTP must keep session valid: valid=%v", s.Valid)
+	}
+}
+
+func TestREPL_ForwardsGenToScorer(t *testing.T) {
+	d := baseDeps()
+	d.Gen = 4242
+	fs := d.Scorer.(*fakeScorer)
+	RunREPL("alice", "1.2.3.4", "s1", lineReader(strings.NewReader("ls\n")), d)
+	if fs.gotGen != 4242 {
+		t.Fatalf("login gen must reach the scorer; got %d", fs.gotGen)
 	}
 }
 
@@ -307,7 +319,7 @@ func TestREPL_RepeatedDenyCommand_SkipsSecondOTP(t *testing.T) {
 
 func TestREPL_RepeatedModelHardCommand_SkipsSecondOTP(t *testing.T) {
 	d := baseDeps()
-	d.Scorer = fakeScorer{score: 0.01} // below hard threshold
+	d.Scorer = &fakeScorer{score: 0.01} // below hard threshold
 	otp := &countingOTP{ok: true}
 	d.OTP = otp
 	sh := d.Shell.(*fakeShell)
@@ -360,7 +372,7 @@ func TestREPL_RateLimitSoft_LogOnly_NoOTP(t *testing.T) {
 
 func TestREPL_ModelSoftScore_LogOnly_NoOTP(t *testing.T) {
 	d := baseDeps()
-	d.Scorer = fakeScorer{score: 0.03} // between hard 0.02 and soft 0.05 -> SevSoft
+	d.Scorer = &fakeScorer{score: 0.03} // between hard 0.02 and soft 0.05 -> SevSoft
 	otp := &countingOTP{ok: true}
 	d.OTP = otp
 	al := d.Alerter.(*fakeAlerter)

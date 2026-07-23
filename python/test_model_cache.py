@@ -1,4 +1,4 @@
-import os, pickle, tempfile, unittest
+import hashlib, hmac, os, pickle, tempfile, unittest
 import numpy as np
 from sklearn.ensemble import IsolationForest
 
@@ -11,6 +11,13 @@ def make_model(path):
         np.random.RandomState(0).rand(50, 6))
     with open(path, "wb") as f:
         pickle.dump(clf, f)
+
+
+def sign(path, key):
+    with open(path, "rb") as f:
+        mac = hmac.new(key, f.read(), hashlib.sha256).hexdigest()
+    with open(path + ".hmac", "w") as f:
+        f.write(mac)
 
 
 VEC = [1.0, 0.0, 1, 1, 1, 1]
@@ -71,6 +78,41 @@ class ModelCacheTest(unittest.TestCase):
             os.utime(p, (2_000_000_000, 2_000_000_000))  # force newer mtime
             # must reload without error and keep scoring
             self.assertIsInstance(c.score("al", VEC), float)
+
+    def test_hmac_valid_signature_scores(self):
+        key = b"k" * 32
+        with tempfile.TemporaryDirectory() as d:
+            p = os.path.join(d, "alice", "model.pkl")
+            make_model(p)
+            sign(p, key)
+            c = ModelCache(d, 900, hmac_key=key)
+            self.assertIsInstance(c.score("alice", VEC), float)
+
+    def test_hmac_missing_sidecar_refused(self):
+        key = b"k" * 32
+        with tempfile.TemporaryDirectory() as d:
+            p = os.path.join(d, "bob", "model.pkl")
+            make_model(p)  # no .hmac written
+            c = ModelCache(d, 900, hmac_key=key)
+            self.assertEqual(c.score("bob", VEC), NO_MODEL_SCORE)
+            self.assertTrue(os.path.exists(p))  # refused, not deleted
+
+    def test_hmac_tampered_refused(self):
+        key = b"k" * 32
+        with tempfile.TemporaryDirectory() as d:
+            p = os.path.join(d, "eve", "model.pkl")
+            make_model(p)
+            sign(p, key)
+            with open(p + ".hmac", "w") as f:
+                f.write("00" * 32)  # wrong mac
+            c = ModelCache(d, 900, hmac_key=key)
+            self.assertEqual(c.score("eve", VEC), NO_MODEL_SCORE)
+
+    def test_traversing_user_rejected(self):
+        with tempfile.TemporaryDirectory() as d:
+            c = ModelCache(d, 900)
+            with self.assertRaises(ValueError):
+                c.score("../../etc", VEC)
 
     def test_evict_idle(self):
         with tempfile.TemporaryDirectory() as d:

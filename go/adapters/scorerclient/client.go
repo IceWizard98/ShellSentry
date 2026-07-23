@@ -23,12 +23,13 @@ type request struct {
 	User      string       `json:"user"`
 	SessionID string       `json:"session_id"`
 	Features  core.Feature `json:"features"`
+	Gen       int64        `json:"gen"`
 }
 type response struct {
 	Score float64 `json:"score"`
 }
 
-func (c *Client) Score(ctx context.Context, user, sessionID string, f core.Feature) (float64, error) {
+func (c *Client) Score(ctx context.Context, user, sessionID string, f core.Feature, gen int64) (float64, error) {
 	d := net.Dialer{}
 	conn, err := d.DialContext(ctx, "tcp", c.addr)
 	if err != nil {
@@ -39,7 +40,7 @@ func (c *Client) Score(ctx context.Context, user, sessionID string, f core.Featu
 	if dl, ok := ctx.Deadline(); ok {
 		_ = conn.SetDeadline(dl)
 	}
-	req := request{User: user, SessionID: sessionID, Features: f}
+	req := request{User: user, SessionID: sessionID, Features: f, Gen: gen}
 	if err := json.NewEncoder(conn).Encode(req); err != nil {
 		return 0, fmt.Errorf("send request: %w", err)
 	}

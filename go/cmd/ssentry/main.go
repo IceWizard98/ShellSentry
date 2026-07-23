@@ -17,10 +17,10 @@ import (
 
 	"shellsentry/adapters/alertsock"
 	"shellsentry/adapters/geomaxmind"
+	"shellsentry/adapters/otpsockclient"
 	"shellsentry/adapters/ptyshell"
 	"shellsentry/adapters/scorerclient"
 	"shellsentry/adapters/sqlitestore"
-	"shellsentry/adapters/totpauth"
 	"shellsentry/core"
 	"shellsentry/ports"
 )
@@ -58,6 +58,7 @@ func rootCmd() *cobra.Command {
 	}
 	root.AddCommand(runCmd())
 	root.AddCommand(trainCmd())
+	root.AddCommand(otpdCmd())
 	return root
 }
 
@@ -108,13 +109,18 @@ func runSession(cfgPath string) error {
 		return fmt.Errorf("current user: %w", err)
 	}
 	username := u.Username
+	// Guard every downstream <root>/<user>/... path join (artifacts, DB, OTP)
+	// against a username that could traverse out of its per-user directory.
+	if err := core.ValidUsername(username); err != nil {
+		return fmt.Errorf("refusing session: %w", err)
+	}
 	ip := clientIP() // from SSH_CONNECTION
 	sessionID := fmt.Sprintf("%d", time.Now().UnixNano())
 	host, _ := os.Hostname() // "" on error -> prompt shows user@ only
 	home := u.HomeDir        // compressed to "~" in the prompt
 
 	novSev := cfg.NoveltySev()
-	dicts, softThr, hardThr := loadUserArtifacts(cfg.RootPath, username)
+	dicts, softThr, hardThr, gen := loadUserArtifacts(cfg.RootPath, username)
 	rules := loadRules(cfg.RulesPath)
 
 	var geo ports.GeoResolver
@@ -128,7 +134,12 @@ func runSession(cfgPath string) error {
 		defer func() { _ = g.Close() }() // release the mmap'd GeoIP reader
 	}
 
-	otp := totpauth.New(cfg.RootPath, "shellsentry", os.Stdin, os.Stdout)
+	// OTP now lives behind the privileged otpd (secret store is root-owned, not
+	// under the user's uid). The session only speaks to it over otp_socket.
+	if cfg.OTPSocket == "" {
+		return fmt.Errorf("otp_socket not configured; start `ssentry otpd` and set otp_socket")
+	}
+	otp := otpsockclient.New(cfg.OTPSocket, os.Stdin, os.Stdout)
 	if err := otp.EnsureProvisioned(username); err != nil {
 		return err
 	}
@@ -154,6 +165,7 @@ func runSession(cfgPath string) error {
 		Dicts:           dicts,
 		SoftThr:         softThr,
 		HardThr:         hardThr,
+		Gen:             gen,
 		OTPRetries:      cfg.OTPRetries,
 		ScoreTimeout:    cfg.ScoreTimeoutDur(),
 		Now:             func() int64 { return time.Now().Unix() },
@@ -223,8 +235,10 @@ func clientIP() string {
 }
 
 // loadUserArtifacts reads dicts.json + thresholds.json; missing -> empty dicts
-// and pass-through thresholds (only rules gate). Never fails the session.
-func loadUserArtifacts(root, user string) (core.Dicts, float64, float64) {
+// and pass-through thresholds (only rules gate). Never fails the session. Also
+// returns the artifact generation (0 if absent) sent on score requests so the
+// daemon can detect a model reloaded mid-session that no longer matches these.
+func loadUserArtifacts(root, user string) (core.Dicts, float64, float64, int64) {
 	var d core.Dicts
 	dictsPath := userFile(root, user, "dicts.json")
 	if raw, err := os.ReadFile(dictsPath); err == nil {
@@ -238,6 +252,7 @@ func loadUserArtifacts(root, user string) (core.Dicts, float64, float64) {
 	// No model -> the -1e18 sentinel keeps every score above threshold, so
 	// nothing is ever flagged by the model alone.
 	soft, hard := -1e18, -1e18
+	var gen int64
 	thrPath := userFile(root, user, "thresholds.json")
 	if raw, err := os.ReadFile(thrPath); err == nil {
 		// Pointer fields distinguish absent from present-but-zero: a thresholds
@@ -246,16 +261,17 @@ func loadUserArtifacts(root, user string) (core.Dicts, float64, float64) {
 		var th struct {
 			Soft *float64 `json:"soft"`
 			Hard *float64 `json:"hard"`
+			Gen  int64    `json:"gen"`
 		}
 		if err := json.Unmarshal(raw, &th); err != nil {
 			fmt.Fprintf(os.Stderr, "ssentry: thresholds file %s present but unparseable, ignoring: %v\n", thrPath, err)
 		} else if th.Soft != nil && th.Hard != nil {
-			soft, hard = *th.Soft, *th.Hard
+			soft, hard, gen = *th.Soft, *th.Hard, th.Gen
 		} else {
 			fmt.Fprintf(os.Stderr, "ssentry: thresholds file %s present but incomplete (missing soft/hard), keeping no-model sentinel\n", thrPath)
 		}
 	}
-	return d, soft, hard
+	return d, soft, hard, gen
 }
 
 func loadRules(path string) core.Rules {

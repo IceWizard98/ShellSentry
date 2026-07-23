@@ -8,6 +8,8 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
+	"time"
 
 	"github.com/spf13/cobra"
 
@@ -37,6 +39,11 @@ func trainCmd() *cobra.Command {
 		RunE: func(_ *cobra.Command, _ []string) error {
 			if user == "" {
 				return fmt.Errorf("--user is required")
+			}
+			// Same path-traversal guard as the runtime: --user becomes
+			// <root>/<user>/ for the DB and artifacts.
+			if err := core.ValidUsername(user); err != nil {
+				return err
 			}
 			if cfgPath == "" {
 				cfgPath = os.Getenv("SSENTRY_CONFIG")
@@ -138,18 +145,32 @@ func trainSession(cfg Config, user string, geo ports.GeoResolver, st sessionStor
 	dicts := core.BuildDicts(rows)
 	matrix := core.BuildMatrix(rows, dicts)
 
-	// 4. write dicts.json (Go owns encoders; Python stays stateless)
+	// 4. stage dicts.json to a temp file. It is published (atomic rename) ONLY
+	// after the trainer succeeds, so a trainer failure never leaves the new
+	// frequency encoders paired with the old model.pkl (a mismatch that would
+	// spuriously challenge the user).
 	userDir := filepath.Join(cfg.RootPath, user)
 	if err := os.MkdirAll(userDir, 0o700); err != nil {
 		return fmt.Errorf("mkdir user dir: %w", err)
 	}
-	if err := writeJSON(filepath.Join(userDir, "dicts.json"), dicts); err != nil {
+	dictsPath := filepath.Join(userDir, "dicts.json")
+	dictsTmp := dictsPath + ".tmp"
+	if err := writeJSON(dictsTmp, dicts); err != nil {
 		return fmt.Errorf("write dicts: %w", err)
 	}
+	defer func() { _ = os.Remove(dictsTmp) }() // no-op once renamed away
 
-	// 5. hand the matrix to the stateless Python trainer over stdin
-	if err := runTrainer(pythonBin, script, userDir, matrix); err != nil {
+	// 5. hand the matrix to the stateless Python trainer over stdin. gen ties this
+	// artifact set together so the runtime can spot a model reloaded mid-session
+	// that no longer matches its login-time dicts/thresholds.
+	gen := time.Now().Unix()
+	if err := runTrainer(pythonBin, script, userDir, matrix, cfg.ModelHMACKeyPath, gen); err != nil {
 		return fmt.Errorf("python trainer: %w", err)
+	}
+
+	// 6. publish dicts.json now that its matching model exists.
+	if err := os.Rename(dictsTmp, dictsPath); err != nil {
+		return fmt.Errorf("publish dicts: %w", err)
 	}
 	fmt.Fprintf(out, "trained on %d commands from %d sessions -> %s\n", len(rows), len(sessions), userDir)
 	return nil
@@ -174,12 +195,16 @@ func flattenRows(sessions []core.Session, geo ports.GeoResolver) []core.TrainRow
 	return rows
 }
 
-func runTrainer(pythonBin, script, outDir string, matrix [][]float64) error {
+func runTrainer(pythonBin, script, outDir string, matrix [][]float64, hmacKeyPath string, gen int64) error {
 	payload, err := json.Marshal(map[string]any{"features": matrix})
 	if err != nil {
 		return fmt.Errorf("marshal matrix: %w", err)
 	}
-	cmd := exec.Command(pythonBin, script, "--outdir", outDir)
+	trainerArgs := []string{script, "--outdir", outDir, "--gen", strconv.FormatInt(gen, 10)}
+	if hmacKeyPath != "" {
+		trainerArgs = append(trainerArgs, "--hmac-key", hmacKeyPath)
+	}
+	cmd := exec.Command(pythonBin, trainerArgs...)
 	cmd.Stdin = bytes.NewReader(payload)
 	cmd.Stderr = os.Stderr
 	if err := cmd.Run(); err != nil {

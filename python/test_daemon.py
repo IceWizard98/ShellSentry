@@ -89,6 +89,14 @@ class DaemonTest(unittest.TestCase):
             self.assertEqual(s.makefile().readline(), "")  # closed, no reply
             s.close()
 
+    def test_traversing_user_closes_without_reply(self):
+        with tempfile.TemporaryDirectory() as d:
+            host, port = self._serve(d)
+            for bad in ("../../etc", "a/b", "..", ""):
+                r = send(host, port,
+                         {"user": bad, "session_id": "s", "features": FEATS})
+                self.assertEqual(r, "", f"user {bad!r} must be rejected")
+
     def test_concurrent_clients(self):
         with tempfile.TemporaryDirectory() as d:
             make_model(os.path.join(d, "alice", "model.pkl"))
@@ -108,6 +116,19 @@ class DaemonTest(unittest.TestCase):
                 t.join()
             self.assertEqual(len(out), 10)
             self.assertTrue(all("score" in r for r in out))
+
+    def test_gen_mismatch_closes(self):
+        with tempfile.TemporaryDirectory() as d:
+            make_model(os.path.join(d, "alice", "model.pkl"))
+            with open(os.path.join(d, "alice", "model.meta.json"), "w") as f:
+                json.dump({"gen": 100}, f)
+            host, port = self._serve(d)
+            ok = send(host, port,
+                      {"user": "alice", "session_id": "s", "features": FEATS, "gen": 100})
+            self.assertIn("score", json.loads(ok))  # matching gen -> scored
+            bad = send(host, port,
+                       {"user": "alice", "session_id": "s", "features": FEATS, "gen": 999})
+            self.assertEqual(bad, "")  # stale gen -> closed, Go fail-opens
 
     def test_nan_score_closes_without_reply(self):
         with tempfile.TemporaryDirectory() as d:
