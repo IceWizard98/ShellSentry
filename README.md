@@ -278,7 +278,7 @@ All settings live in `config.yaml` (copy of `config.example.yaml`).
 
 | Key | Type | Default | Purpose |
 |-----|------|---------|---------|
-| `root_path` | string | `./data` | Per user folder root; holds `sessions.db`, `dicts.json`, `thresholds.json`, `model.pkl`, `totp.secret` |
+| `root_path` | string | `./data` | Per user folder root; holds `sessions.db`, `dicts.json`, `thresholds.json`, `model.pkl` |
 | `geoip_db_path` | string | `./GeoLite2-Country.mmdb` | MaxMind GeoLite2 Country database (optional) |
 | `daemon_addr` | string | `127.0.0.1:9099` | Inference daemon address (keep on localhost) |
 | `score_timeout_ms` | int | `800` | Scorer reply budget; exceeding it fails open |
@@ -292,6 +292,9 @@ All settings live in `config.yaml` (copy of `config.example.yaml`).
 | `python_bin` | string | `""` | Trainer interpreter; empty resolves the venv, then `python3` |
 | `trainer_script` | string | `""` | Trainer path; empty resolves `./python/trainer.py` |
 | `novelty_severity` | string | `soft` | Never seen item for a trained user: `off`, `soft`, or `hard` |
+| `otp_socket` | string | `""` | Unix socket of the privileged `ssentry otpd`; the session validates OTP through it |
+| `otp_root` | string | `""` | otpd's root-owned TOTP secret store; keep it OUTSIDE `root_path` |
+| `model_hmac_key_path` | string | `""` | Root-owned key (0600) signing `model.pkl`; empty disables signature checks |
 
 ## The model, features, and novelty
 
@@ -336,12 +339,22 @@ a compound line (`echo hi && mkfs` is still caught). Command substitution,
 ## Security notes
 
 - The daemon loads `model.pkl` with `pickle`, which executes code if an attacker
-  can write it. Treat `root_path` as trusted only if the trainer account is its
-  sole writer, and keep `daemon_addr` on localhost.
+  can write it. Set `model_hmac_key_path` to a **root-owned** key (`make hmac-key`):
+  the trainer signs each model and the daemon refuses to load an unsigned or
+  forged one, closing the code-exec path from a user-writable model dir. The
+  daemon also validates the `user` field (no path traversal) and keeps
+  `daemon_addr` on localhost. After enabling signing, retrain every user once so
+  their model carries a signature.
+- **OTP secrets are owned by `ssentry otpd`, not the session.** Run `otpd` as root
+  with `otp_root` outside `root_path`; the session validates codes over
+  `otp_socket` and never sees the secret, so a stolen SSH key does not also yield
+  the second factor. otpd authorizes each request by the connecting peer's uid, so
+  a user can only touch their own secret.
 - An unusable or corrupt `model.pkl` is deleted on load and the user reverts to
-  untrained, rather than serving a broken model or looping on a bad file.
-- TOTP secrets are stored `0600` and only persisted after the user confirms
-  enrollment, so a dismissed QR is shown again instead of locking the user out.
+  untrained; an HMAC mismatch is refused (not deleted) so a good model is never
+  destroyed by a lost signature.
+- Enrollment shows the QR until the first correct code confirms it, so a dismissed
+  QR is re-shown instead of locking the user out.
 
 ## Known limitations
 
@@ -350,6 +363,10 @@ a compound line (`echo hi && mkfs` is still caught). Command substitution,
   interception (eBPF, auditd) lands.
 - **Shell metacharacters** beyond the top level operators (command substitution,
   `eval`) are not parsed by the rule pre filter. The model still scores the line.
+- **Deny matches the leading token literally**, so a path-qualified or quoted form
+  (`/bin/rm`, `\rm`, `command rm`) sidesteps a bare `rm` deny entry. Deny the
+  interpreters and escape routes above; the model still scores what the pre-filter
+  misses.
 
 ## Project layout
 

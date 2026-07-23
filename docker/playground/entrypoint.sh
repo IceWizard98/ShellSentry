@@ -10,6 +10,10 @@ set -u
 # 2. inference daemon (scores every command; no model yet -> everything "normal")
 /app/python/venv/bin/python /app/python/daemon.py --config /app/config.yaml \
     >/tmp/daemon.log 2>&1 &
+
+# 3. privileged OTP daemon: owns the TOTP secrets and validates codes over its
+# socket, so the session process never handles the secret directly.
+ssentry otpd --config /app/config.yaml >/tmp/otpd.log 2>&1 &
 sleep 1
 
 cat <<'MOTD'

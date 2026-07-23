@@ -5,6 +5,8 @@ daemon_addr: "127.0.0.1:9099"
 score_timeout_ms: 800
 alert_socket: "/app/data/alerts.sock"
 otp_retries: 3
+otp_socket: "/app/data/otpd.sock"   # session talks to the privileged otpd
+otp_root: "/app/otp-secrets"        # otpd's secret store (own uid in this demo)
 rules_path: "/app/rules.json"
 model_ttl_sec: 900
 command_timeout_ms: 0

@@ -1,4 +1,5 @@
 *.secret
+*.hmac-key
 *.db
 *.mmdb
 .env

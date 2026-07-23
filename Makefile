@@ -1,8 +1,9 @@
-.PHONY: build test lint run clean venv train-test py-test daemon geo playground playground-reset
+.PHONY: build test lint run clean venv train-test py-test daemon otpd hmac-key geo playground playground-reset
 
 IMAGE_PLAYGROUND ?= ssentry-playground
 PLAYGROUND_VOLUME ?= ssplay
 GEOIP_DB ?= data/GeoLite2-Country.mmdb
+HMAC_KEY ?= data/model.hmac-key
 
 build:
 	go -C go build -o ../ssentry ./cmd/ssentry
@@ -31,6 +32,18 @@ py-test: venv
 
 daemon: venv
 	./python/venv/bin/python python/daemon.py --config config.yaml
+
+# Privileged OTP daemon: owns the TOTP secrets (root_owned, outside root_path)
+# and validates codes over otp_socket. Run as root in production.
+otpd: build
+	./ssentry otpd --config config.yaml
+
+# Generate the root-owned HMAC key that signs model.pkl. Point config.yaml
+# `model_hmac_key_path` at $(HMAC_KEY). Keep it 0600 and off version control.
+hmac-key:
+	@mkdir -p $(dir $(HMAC_KEY))
+	@umask 077 && head -c 32 /dev/urandom > $(HMAC_KEY)
+	@echo "wrote $(HMAC_KEY) (0600); set model_hmac_key_path to it and re-train"
 
 # Download the free geo database (DB-IP Country Lite, no account) so geo_id is
 # populated. Without it the detector runs "half" (every command geo_id 0).

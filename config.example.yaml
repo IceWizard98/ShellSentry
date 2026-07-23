@@ -8,6 +8,16 @@ daemon_addr: "127.0.0.1:9099"       # Python inference daemon (NDJSON/TCP)
 score_timeout_ms: 800               # scorer reply budget; exceed -> fail-open
 alert_socket: "./data/alerts.sock"  # unix socket, admin alert stream
 otp_retries: 3
+# OTP is served by the privileged `ssentry otpd` (run as root). The session talks
+# to it over otp_socket; secrets live in otp_root, kept OUTSIDE root_path and
+# root-owned so the scored user can never read their own second factor.
+otp_socket: "/run/ssentry/otpd.sock"
+otp_root: "/var/lib/ssentry-otp"    # root:root 0700, NOT under root_path
+# Root-owned HMAC key (0600) shared by trainer and daemon. When set, model.pkl is
+# signed at training and the daemon refuses to pickle-load an unsigned/forged
+# model — closing the code-exec vector from a user-writable model dir. Generate
+# with `make hmac-key`. Empty = no signing (NOT recommended in multi-user setups).
+model_hmac_key_path: "/var/lib/ssentry-keys/model.hmac-key"
 rules_path: "./rules.json"
 model_ttl_sec: 900                  # contract value consumed by the Python daemon
 command_timeout_ms: 0               # per-command wall-clock ceiling; 0 = disabled

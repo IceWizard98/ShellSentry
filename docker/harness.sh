@@ -22,6 +22,8 @@ alert_socket: "/work/alerts.sock"
 otp_retries: 2
 rules_path: "/work/rules.json"
 model_ttl_sec: 900
+otp_socket: "/work/otpd.sock"
+otp_root: "/work/otp-secrets"
 EOF
 # Base rule: deny the "id" command (bare token) — must catch "id -un" too (F1 token-prefix).
 echo '{"commands":{"deny":["id"],"allow":[]},"min_seconds_between":0,"countries":{"deny":[],"allow":[]}}' > /work/rules.json
@@ -32,10 +34,16 @@ except Exception: print(0)"; }
 
 python3 /harness/mock_scorer.py & sleep 1
 
-echo "=== provision TOTP (first login) ==="
-PROV=$(printf 'exit\n' | timeout 15 ssentry run --config "$CFG" 2>&1)
-SECRET=$(echo "$PROV" | sed -n 's/.*secret manually: \([A-Z2-7]*\).*/\1/p')
-if [ -n "$SECRET" ]; then pass "first-login QR + secret shown"; else fail "no TOTP secret on first login"; echo "$PROV" | head; fi
+# Privileged OTP daemon owns the secret store; the session validates over its
+# socket. In this single-user harness otpd runs as the same user.
+ssentry otpd --config "$CFG" >/tmp/otpd.log 2>&1 & sleep 1
+
+echo "=== provision TOTP (first login, confirm enrollment) ==="
+# 'y' confirms enrollment so the secret is persisted (and the QR not re-shown);
+# the trailing 'exit' ends the empty session.
+PROV=$(printf 'y\nexit\n' | timeout 15 ssentry run --config "$CFG" 2>&1)
+SECRET=$(cat /work/otp-secrets/"$USER_NAME"/totp.secret 2>/dev/null)
+if [ -n "$SECRET" ]; then pass "first-login QR shown + enrollment confirmed"; else fail "no TOTP secret after enrollment"; echo "$PROV" | head; fi
 
 echo "=== Test A: command interception + persistence ==="
 OUTA=$(printf 'whoami\ncd /tmp\npwd\nexit\n' | timeout 15 ssentry run --config "$CFG" 2>&1)
